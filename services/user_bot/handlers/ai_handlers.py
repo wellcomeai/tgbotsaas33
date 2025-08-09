@@ -1,5 +1,5 @@
 """
-Обработчики ИИ ассистента с поддержкой OpenAI Assistants
+Обработчики ИИ ассистента с поддержкой OpenAI Assistants (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 """
 
 import structlog
@@ -125,6 +125,27 @@ class AIHandler:
             [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
         ])
         await message.answer("Настройка отменена", reply_markup=keyboard)
+    
+    async def _safe_update_user_bot(self, **kwargs):
+        """Безопасное обновление настроек UserBot"""
+        try:
+            if self.user_bot and hasattr(self.user_bot, 'update_ai_settings'):
+                await self.user_bot.update_ai_settings(**kwargs)
+            else:
+                logger.warning("UserBot doesn't have update_ai_settings method", bot_id=self.bot_id)
+        except Exception as e:
+            logger.error("Failed to update UserBot settings", bot_id=self.bot_id, error=str(e))
+    
+    async def _safe_update_bot_manager(self, **kwargs):
+        """Безопасное обновление через bot_manager"""
+        try:
+            bot_manager = self.bot_config.get('bot_manager')
+            if bot_manager and hasattr(bot_manager, 'update_bot_config'):
+                await bot_manager.update_bot_config(self.bot_id, **kwargs)
+            else:
+                logger.warning("BotManager doesn't have update_bot_config method", bot_id=self.bot_id)
+        except Exception as e:
+            logger.error("Failed to update BotManager config", bot_id=self.bot_id, error=str(e))
     
     async def cb_admin_ai(self, callback: CallbackQuery):
         """Главное меню настроек ИИ"""
@@ -317,16 +338,11 @@ class AIHandler:
             # Обновляем локальные настройки
             self.ai_assistant_settings = ai_settings
             
-            # Обновляем в UserBot
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(ai_assistant_settings=ai_settings)
+            # Безопасное обновление UserBot
+            await self._safe_update_user_bot(ai_assistant_settings=ai_settings)
             
-            # Обновляем bot_manager
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_settings=ai_settings
-                )
+            # Безопасное обновление bot_manager
+            await self._safe_update_bot_manager(ai_assistant_settings=ai_settings)
             
             # Переходим к настройкам выбранного типа
             if agent_type == 'chatforyou':
@@ -499,9 +515,8 @@ class AIHandler:
             
             await message.answer("🔄 Создаю агента в OpenAI...")
             
-            # Здесь будет вызов сервиса OpenAI для создания агента
-            # Пока заглушка
-            success = await self._create_agent_in_openai(agent_name, agent_role)
+            # Пытаемся создать агента через OpenAI сервис
+            success, response_data = await self._create_agent_in_openai(agent_name, agent_role)
             
             if success:
                 await message.answer(
@@ -529,20 +544,104 @@ class AIHandler:
             await message.answer("❌ Произошла ошибка при создании агента")
             await state.clear()
     
-    async def _create_agent_in_openai(self, name: str, role: str) -> bool:
-        """Создание агента в OpenAI (заглушка)"""
+    async def _create_agent_in_openai(self, name: str, role: str) -> tuple[bool, dict]:
+        """
+        Создание агента в OpenAI
+        
+        Returns:
+            tuple: (success: bool, response_data: dict)
+        """
         try:
-            # Здесь будет вызов OpenAI API
-            # return await openai_service.create_assistant(name, role)
-            
-            # Пока возвращаем True для тестирования
-            return True
+            # Пытаемся импортировать и использовать OpenAI сервис
+            try:
+                from services.openai_assistant import openai_client
+                from services.openai_assistant.models import OpenAICreateAgentRequest
+                
+                # Создаем запрос
+                request = OpenAICreateAgentRequest(
+                    bot_id=self.bot_id,
+                    agent_name=name,
+                    agent_role=role,
+                    system_prompt=f"Ты - {role}. Твое имя {name}. Отвечай полезно и дружелюбно."
+                )
+                
+                # Валидируем запрос
+                is_valid, error_msg = openai_client.validate_create_request(request)
+                if not is_valid:
+                    logger.error("OpenAI request validation failed", error=error_msg)
+                    return False, {"error": error_msg}
+                
+                # Создаем агента
+                agent = request.to_agent()
+                response = await openai_client.create_assistant(agent)
+                
+                if response.success:
+                    # Сохраняем в настройки бота
+                    ai_settings = self.ai_assistant_settings.copy()
+                    ai_settings.update({
+                        'agent_type': 'openai',
+                        'local_agent_id': f"openai_{int(datetime.now().timestamp())}",
+                        'openai_assistant_id': response.assistant_id,
+                        'agent_name': name,
+                        'agent_role': role,
+                        'created_at': datetime.now().isoformat()
+                    })
+                    
+                    # Обновляем в БД
+                    await self.db.update_ai_assistant(
+                        self.bot_id,
+                        settings=ai_settings
+                    )
+                    
+                    # Обновляем локальные настройки
+                    self.ai_assistant_settings = ai_settings
+                    
+                    # Безопасное обновление других компонентов
+                    await self._safe_update_user_bot(ai_assistant_settings=ai_settings)
+                    await self._safe_update_bot_manager(ai_assistant_settings=ai_settings)
+                    
+                    logger.info("OpenAI agent created successfully", 
+                               bot_id=self.bot_id,
+                               agent_name=name,
+                               assistant_id=response.assistant_id)
+                    
+                    return True, {
+                        "assistant_id": response.assistant_id,
+                        "message": response.message
+                    }
+                else:
+                    logger.error("OpenAI assistant creation failed", 
+                               bot_id=self.bot_id,
+                               error=response.error)
+                    return False, {"error": response.error}
+                
+            except ImportError as e:
+                logger.error("OpenAI service not available", error=str(e))
+                # Fallback: сохраняем как заглушку для будущей реализации
+                ai_settings = self.ai_assistant_settings.copy()
+                ai_settings.update({
+                    'agent_type': 'openai',
+                    'local_agent_id': f"stub_{int(datetime.now().timestamp())}",
+                    'agent_name': name,
+                    'agent_role': role,
+                    'created_at': datetime.now().isoformat(),
+                    'status': 'stub_created'  # Помечаем как заглушку
+                })
+                
+                await self.db.update_ai_assistant(self.bot_id, settings=ai_settings)
+                self.ai_assistant_settings = ai_settings
+                
+                logger.info("OpenAI agent created as stub (service not available)", 
+                           bot_id=self.bot_id, agent_name=name)
+                
+                return True, {"message": "Агент создан (тестовый режим)"}
             
         except Exception as e:
-            logger.error("Failed to create OpenAI assistant", error=str(e))
-            return False
+            logger.error("Exception in _create_agent_in_openai", 
+                        bot_id=self.bot_id, error=str(e))
+            return False, {"error": f"Внутренняя ошибка: {str(e)}"}
     
-    # ============ СУЩЕСТВУЮЩИЕ МЕТОДЫ CHATFORYOU ============
+    # ============ МЕТОДЫ ПЕРЕКЛЮЧЕНИЯ С БЕЗОПАСНЫМ ОБНОВЛЕНИЕМ ============
     
     async def _toggle_ai_assistant(self, callback: CallbackQuery):
         """Переключение ИИ ассистента (ChatForYou)"""
@@ -559,15 +658,12 @@ class AIHandler:
             
             self.ai_assistant_enabled = new_status
             
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(ai_assistant_enabled=new_status)
-            
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_enabled=new_status,
-                    ai_assistant_settings=ai_settings
-                )
+            # Безопасное обновление
+            await self._safe_update_user_bot(ai_assistant_enabled=new_status)
+            await self._safe_update_bot_manager(
+                ai_assistant_enabled=new_status,
+                ai_assistant_settings=ai_settings
+            )
             
             status_text = "включен" if new_status else "выключен"
             await callback.answer(f"ИИ агент {status_text}!", show_alert=True)
@@ -593,15 +689,12 @@ class AIHandler:
             
             self.ai_assistant_enabled = new_status
             
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(ai_assistant_enabled=new_status)
-            
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_enabled=new_status,
-                    ai_assistant_settings=ai_settings
-                )
+            # Безопасное обновление
+            await self._safe_update_user_bot(ai_assistant_enabled=new_status)
+            await self._safe_update_bot_manager(
+                ai_assistant_enabled=new_status,
+                ai_assistant_settings=ai_settings
+            )
             
             status_text = "включен" if new_status else "выключен"
             await callback.answer(f"OpenAI агент {status_text}!", show_alert=True)
@@ -611,6 +704,8 @@ class AIHandler:
         except Exception as e:
             logger.error("Failed to toggle OpenAI assistant", error=str(e))
             await callback.answer("Ошибка при изменении настроек", show_alert=True)
+    
+    # ============ ОСТАЛЬНЫЕ МЕТОДЫ (без изменений) ============
     
     async def _set_assistant_id(self, callback: CallbackQuery, state: FSMContext):
         """Настройка ID ассистента (ChatForYou)"""
@@ -711,7 +806,7 @@ class AIHandler:
         
         await callback.message.edit_text(text, reply_markup=keyboard)
     
-    # ============ ОБРАБОТЧИКИ ВВОДА CHATFORYOU ============
+    # ============ ОБРАБОТЧИКИ ВВОДА CHATFORYOU (без изменений) ============
     
     async def handle_api_token_input(self, message: Message, state: FSMContext):
         """Обработка ввода API токена (существующая логика)"""
@@ -781,18 +876,15 @@ class AIHandler:
                 self.ai_assistant_id = api_token
                 self.ai_assistant_settings = ai_settings
                 
-                if self.user_bot:
-                    await self.user_bot.update_ai_settings(
-                        ai_assistant_id=api_token,
-                        ai_assistant_settings=ai_settings
-                    )
-                
-                if self.bot_config.get('bot_manager'):
-                    await self.bot_config['bot_manager'].update_bot_config(
-                        self.bot_id,
-                        ai_assistant_id=api_token,
-                        ai_assistant_settings=ai_settings
-                    )
+                # Безопасное обновление
+                await self._safe_update_user_bot(
+                    ai_assistant_id=api_token,
+                    ai_assistant_settings=ai_settings
+                )
+                await self._safe_update_bot_manager(
+                    ai_assistant_id=api_token,
+                    ai_assistant_settings=ai_settings
+                )
                 
                 success_text = f"""
 ✅ <b>ProTalk настроен и готов!</b>
@@ -890,18 +982,15 @@ class AIHandler:
             self.ai_assistant_id = api_token
             self.ai_assistant_settings = ai_settings
             
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(
-                    ai_assistant_id=api_token,
-                    ai_assistant_settings=ai_settings
-                )
-            
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_id=api_token,
-                    ai_assistant_settings=ai_settings
-                )
+            # Безопасное обновление
+            await self._safe_update_user_bot(
+                ai_assistant_id=api_token,
+                ai_assistant_settings=ai_settings
+            )
+            await self._safe_update_bot_manager(
+                ai_assistant_id=api_token,
+                ai_assistant_settings=ai_settings
+            )
             
             success_text = f"""
 🎉 <b>ChatForYou полностью настроен и протестирован!</b>
@@ -927,6 +1016,7 @@ class AIHandler:
             await message.answer("❌ Ошибка при проверке конфигурации ChatForYou")
             await state.clear()
     
+    # Совместимость
     async def handle_ai_assistant_id_input(self, message: Message, state: FSMContext):
         """Обработчик для совместимости"""
         await self.handle_api_token_input(message, state)
@@ -935,8 +1025,6 @@ class AIHandler:
         """Обработка ввода дневного лимита (не используется для OpenAI)"""
         if not self._is_owner(message.from_user.id):
             return
-        
-        # Эта функция оставлена для ChatForYou, для OpenAI лимитов нет
         pass
     
     # ============ ОБЩИЕ ОБРАБОТЧИКИ ============
@@ -1009,18 +1097,22 @@ class AIHandler:
                     "is_test": data.get('is_test_mode', False)
                 }
             
-            from services.ai_assistant import ai_client
-            
-            ai_response = await ai_client.send_message(
-                api_token=self.ai_assistant_id,
-                message=message.text,
-                user_id=message.from_user.id,
-                bot_id=bot_id_value,
-                platform=platform,
-                context=context
-            )
-            
-            return ai_response
+            try:
+                from services.ai_assistant import ai_client
+                
+                ai_response = await ai_client.send_message(
+                    api_token=self.ai_assistant_id,
+                    message=message.text,
+                    user_id=message.from_user.id,
+                    bot_id=bot_id_value,
+                    platform=platform,
+                    context=context
+                )
+                
+                return ai_response
+            except ImportError:
+                logger.warning("AI assistant service not available")
+                return "🤖 ИИ сервис временно недоступен."
             
         except Exception as e:
             logger.error("Error in ChatForYou conversation", error=str(e))
@@ -1029,11 +1121,40 @@ class AIHandler:
     async def _handle_openai_conversation(self, message: Message, data: dict) -> str:
         """Обработка диалога с OpenAI агентом"""
         try:
-            # Здесь будет вызов OpenAI сервиса
-            # return await openai_service.send_message(...)
-            
-            # Пока заглушка
-            return f"🤖 OpenAI Agent: Получил ваше сообщение '{message.text}'. Это тестовый ответ."
+            # Пытаемся использовать OpenAI сервис
+            try:
+                from services.openai_assistant import openai_client
+                from services.openai_assistant.models import OpenAIConversationContext
+                
+                openai_assistant_id = self.ai_assistant_settings.get('openai_assistant_id')
+                if not openai_assistant_id:
+                    return "❌ OpenAI агент не настроен."
+                
+                # Создаем контекст
+                context = OpenAIConversationContext(
+                    user_id=message.from_user.id,
+                    user_name=message.from_user.first_name or "Пользователь",
+                    username=message.from_user.username,
+                    bot_id=self.bot_id,
+                    chat_id=message.chat.id,
+                    is_admin=data.get('is_test_mode', False)
+                )
+                
+                # Отправляем сообщение
+                response = await openai_client.send_message(
+                    assistant_id=openai_assistant_id,
+                    message=message.text,
+                    user_id=message.from_user.id,
+                    context=context
+                )
+                
+                return response or "❌ Не удалось получить ответ от OpenAI."
+                
+            except ImportError:
+                # Fallback для случая когда OpenAI сервис недоступен
+                logger.warning("OpenAI service not available, using fallback")
+                agent_name = self.ai_assistant_settings.get('agent_name', 'ИИ Агент')
+                return f"🤖 {agent_name}: Получил ваше сообщение '{message.text}'. Это тестовый ответ, так как OpenAI сервис еще не подключен."
             
         except Exception as e:
             logger.error("Error in OpenAI conversation", error=str(e))
@@ -1068,7 +1189,11 @@ class AIHandler:
                 local_agent_id = self.ai_assistant_settings.get('local_agent_id')
                 if local_agent_id:
                     # Здесь будем получать имя из БД
-                    agent_name = "собственным ИИ агентом"
+                    saved_name = self.ai_assistant_settings.get('agent_name')
+                    if saved_name:
+                        agent_name = f"агентом {saved_name}"
+                    else:
+                        agent_name = "собственным ИИ агентом"
             
             welcome_text = f"""
 🤖 <b>Добро пожаловать в чат с {agent_name}!</b>
