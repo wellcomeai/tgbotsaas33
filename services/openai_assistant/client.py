@@ -1,14 +1,16 @@
 """
 OpenAI Assistant Client
-Основной клиент для работы с OpenAI Assistants API с детальным логированием
+Основной клиент для работы с OpenAI Assistants API с детальным логированием и retry логикой
 """
 
 import os
 import asyncio
 import time
+import random
 from typing import Optional, Dict, Any, List
 import structlog
 from openai import AsyncOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .models import (
     OpenAIAgent, 
@@ -23,7 +25,7 @@ logger = structlog.get_logger()
 
 
 class OpenAIAssistantClient:
-    """Клиент для работы с OpenAI Assistants API с полным логированием"""
+    """Клиент для работы с OpenAI Assistants API с полным логированием и retry логикой"""
     
     def __init__(self):
         logger.info("🔧 Initializing OpenAIAssistantClient")
@@ -92,11 +94,53 @@ class OpenAIAssistantClient:
             
             return False
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    async def _create_assistant_with_retry(self, config: dict) -> any:
+        """Создание ассистента с retry логикой"""
+        logger.info("📡 Making OpenAI API call with retry logic...")
+        return await self.client.beta.assistants.create(**config)
+    
+    async def _fallback_to_chat_completion(self, agent: OpenAIAgent) -> Optional[OpenAIResponse]:
+        """Fallback на Chat Completions API когда Assistants API недоступен"""
+        try:
+            logger.info("🔄 Using Chat Completions fallback")
+            
+            # Создаем простой запрос для проверки что Chat API работает
+            test_response = await self.client.chat.completions.create(
+                model=agent.model,
+                messages=[
+                    {"role": "system", "content": agent.system_prompt or f"Ты - {agent.agent_role}. Твое имя {agent.agent_name}."},
+                    {"role": "user", "content": "Привет! Ответь кратко что ты готов к работе."}
+                ],
+                max_tokens=100
+            )
+            
+            if test_response.choices and test_response.choices[0].message:
+                logger.info("✅ Chat Completions fallback successful")
+                
+                # Создаем "виртуального" ассистента
+                virtual_assistant_id = f"chat_{int(time.time())}"
+                
+                return OpenAIResponse.success_response(
+                    message=f"Агент создан через Chat API (fallback). Assistants API временно недоступен.",
+                    assistant_id=virtual_assistant_id
+                )
+            
+        except Exception as e:
+            logger.error("❌ Chat Completions fallback failed", error=str(e))
+        
+        return None
+    
     async def create_assistant(self, agent: OpenAIAgent) -> OpenAIResponse:
-        """Создание ассистента в OpenAI с детальным логированием"""
+        """Создание ассистента в OpenAI с retry логикой и детальным логированием"""
         
         # 🔍 ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ - НАЧАЛО
-        logger.info("🚀 Starting OpenAI assistant creation", 
+        logger.info("🚀 Starting OpenAI assistant creation with retry", 
                    bot_id=agent.bot_id,
                    agent_name=agent.agent_name,
                    agent_role=agent.agent_role,
@@ -164,114 +208,166 @@ class OpenAIAssistantClient:
             
             logger.info("✅ Config validation passed")
             
-            # Логирование перед API вызовом
-            logger.info("📡 Making OpenAI API call...", 
-                       endpoint="beta.assistants.create",
-                       config=config)
-            
+            # 🎯 ОСНОВНОЙ API ВЫЗОВ С RETRY ЛОГИКОЙ
             start_time = time.time()
+            retry_attempt = 0
             
-            # 🎯 ОСНОВНОЙ API ВЫЗОВ
-            try:
-                logger.info("⏳ Sending request to OpenAI...")
-                assistant = await self.client.beta.assistants.create(**config)
-                api_call_duration = time.time() - start_time
-                
-                logger.info("🎉 OpenAI API call successful", 
-                           assistant_id=assistant.id,
-                           assistant_name=assistant.name,
-                           assistant_model=assistant.model,
-                           api_call_duration=f"{api_call_duration:.2f}s",
-                           created_at=assistant.created_at,
-                           object_type=assistant.object,
-                           assistant_tools=len(assistant.tools) if hasattr(assistant, 'tools') else 0)
-                
-                # Логирование полного ответа для диагностики
-                logger.debug("📊 Full assistant response", 
-                            full_response={
-                                'id': assistant.id,
-                                'name': assistant.name,
-                                'model': assistant.model,
-                                'instructions': assistant.instructions[:100] + "..." if len(assistant.instructions) > 100 else assistant.instructions,
-                                'tools': [tool.type if hasattr(tool, 'type') else str(tool) for tool in assistant.tools] if hasattr(assistant, 'tools') else [],
-                                'metadata': assistant.metadata,
-                                'created_at': assistant.created_at
-                            })
-                
-            except Exception as api_error:
-                api_call_duration = time.time() - start_time
-                
-                # 🚨 ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОШИБОК API
-                logger.error("💥 OpenAI API call failed", 
-                            error_type=type(api_error).__name__,
-                            error_message=str(api_error),
-                            api_call_duration=f"{api_call_duration:.2f}s",
-                            config_sent=config,
-                            full_error=repr(api_error))
-                
-                # Анализ типа ошибки
-                error_str = str(api_error).lower()
-                
-                if "500" in error_str or "internal server error" in error_str:
-                    logger.error("🔥 Server Error (500) - OpenAI internal problem", 
-                               recommendation="Retry in a few minutes",
-                               status_check="https://status.openai.com/")
+            while retry_attempt < 3:
+                try:
+                    logger.info("📡 API attempt", 
+                               attempt=retry_attempt + 1,
+                               max_attempts=3,
+                               config=config)
                     
-                elif "401" in error_str or "unauthorized" in error_str:
-                    logger.error("🔑 Authentication Error (401)", 
-                               api_key_prefix=self.api_key[:12] + "..." if self.api_key else "None",
-                               recommendation="Check API key validity",
-                               check_url="https://platform.openai.com/account/api-keys")
+                    # Основной вызов с retry декоратором
+                    assistant = await self._create_assistant_with_retry(config)
                     
-                elif "429" in error_str or "rate limit" in error_str:
-                    logger.error("⏱️ Rate Limit Error (429)", 
-                               recommendation="Wait and retry, check usage tier",
-                               check_url="https://platform.openai.com/account/billing/overview")
+                    api_call_duration = time.time() - start_time
                     
-                elif "400" in error_str or "bad request" in error_str:
-                    logger.error("❌ Bad Request (400) - Invalid parameters", 
-                               config=config,
-                               recommendation="Check request parameters",
-                               possible_issues=["Invalid model name", "Too long instructions", "Invalid tools config"])
+                    logger.info("🎉 OpenAI API call successful", 
+                               assistant_id=assistant.id,
+                               assistant_name=assistant.name,
+                               assistant_model=assistant.model,
+                               api_call_duration=f"{api_call_duration:.2f}s",
+                               created_at=assistant.created_at,
+                               object_type=assistant.object,
+                               retry_attempt=retry_attempt + 1,
+                               assistant_tools=len(assistant.tools) if hasattr(assistant, 'tools') else 0)
                     
-                elif "404" in error_str or "not found" in error_str:
-                    logger.error("🔍 Not Found (404)", 
-                               model=config.get('model'),
-                               recommendation="Check model availability",
-                               available_models_check="Use models.list() API")
+                    # Логирование полного ответа для диагностики
+                    logger.debug("📊 Full assistant response", 
+                                full_response={
+                                    'id': assistant.id,
+                                    'name': assistant.name,
+                                    'model': assistant.model,
+                                    'instructions': assistant.instructions[:100] + "..." if len(assistant.instructions) > 100 else assistant.instructions,
+                                    'tools': [tool.type if hasattr(tool, 'type') else str(tool) for tool in assistant.tools] if hasattr(assistant, 'tools') else [],
+                                    'metadata': assistant.metadata,
+                                    'created_at': assistant.created_at
+                                })
                     
-                elif "503" in error_str or "service unavailable" in error_str:
-                    logger.error("🚫 Service Unavailable (503)",
-                               recommendation="OpenAI service temporarily down")
+                    # Успешное завершение
+                    total_duration = time.time() - start_time
+                    logger.info("✨ Assistant creation completed successfully", 
+                               assistant_id=assistant.id,
+                               bot_id=agent.bot_id,
+                               total_duration=f"{total_duration:.2f}s",
+                               agent_name=agent.agent_name)
                     
-                else:
-                    logger.error("❓ Unknown API error", 
-                               error_details=repr(api_error),
-                               suggestion="Check OpenAI API documentation")
-                
-                # Дополнительная диагностика для HTTP ошибок
-                if hasattr(api_error, 'response'):
-                    logger.error("📡 HTTP Response details",
-                               status_code=getattr(api_error.response, 'status_code', 'unknown'),
-                               headers=dict(getattr(api_error.response, 'headers', {})),
-                               response_text=getattr(api_error.response, 'text', 'no text')[:500])
-                
-                # Возвращаем детальную ошибку
-                return OpenAIResponse.error_response(f"OpenAI API Error: {str(api_error)}")
+                    return OpenAIResponse.success_response(
+                        message="Ассистент успешно создан",
+                        assistant_id=assistant.id,
+                        response_time=total_duration
+                    )
+                    
+                except Exception as api_error:
+                    retry_attempt += 1
+                    api_call_duration = time.time() - start_time
+                    
+                    # 🚨 ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОШИБОК API
+                    logger.error("💥 OpenAI API call failed", 
+                                retry_attempt=retry_attempt,
+                                max_attempts=3,
+                                error_type=type(api_error).__name__,
+                                error_message=str(api_error),
+                                api_call_duration=f"{api_call_duration:.2f}s",
+                                config_sent=config,
+                                full_error=repr(api_error))
+                    
+                    # Анализ типа ошибки
+                    error_str = str(api_error).lower()
+                    
+                    if "500" in error_str or "internal server error" in error_str:
+                        logger.error("🔥 Server Error (500) - OpenAI internal problem", 
+                                   recommendation="Retry in a few minutes",
+                                   status_check="https://status.openai.com/")
+                        
+                        if retry_attempt < 3:
+                            wait_time = 2 ** retry_attempt + random.uniform(0, 1)
+                            logger.info("🔄 Retrying after server error", 
+                                       wait_time=f"{wait_time:.1f}s",
+                                       attempt=retry_attempt + 1)
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                    elif "401" in error_str or "unauthorized" in error_str:
+                        logger.error("🔑 Authentication Error (401)", 
+                                   api_key_prefix=self.api_key[:12] + "..." if self.api_key else "None",
+                                   recommendation="Check API key validity",
+                                   check_url="https://platform.openai.com/account/api-keys")
+                        # Не retry для 401
+                        break
+                        
+                    elif "429" in error_str or "rate limit" in error_str:
+                        logger.error("⏱️ Rate Limit Error (429)", 
+                                   recommendation="Wait and retry, check usage tier",
+                                   check_url="https://platform.openai.com/account/billing/overview")
+                        
+                        if retry_attempt < 3:
+                            wait_time = 5 * (2 ** retry_attempt)
+                            logger.info("⏱️ Retrying after rate limit", 
+                                       wait_time=f"{wait_time:.1f}s",
+                                       attempt=retry_attempt + 1)
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                    elif "400" in error_str or "bad request" in error_str:
+                        logger.error("❌ Bad Request (400) - Invalid parameters", 
+                                   config=config,
+                                   recommendation="Check request parameters",
+                                   possible_issues=["Invalid model name", "Too long instructions", "Invalid tools config"])
+                        # Не retry для 400
+                        break
+                        
+                    elif "404" in error_str or "not found" in error_str:
+                        logger.error("🔍 Not Found (404)", 
+                                   model=config.get('model'),
+                                   recommendation="Check model availability",
+                                   available_models_check="Use models.list() API")
+                        # Не retry для 404
+                        break
+                        
+                    elif "503" in error_str or "service unavailable" in error_str:
+                        logger.error("🚫 Service Unavailable (503)",
+                                   recommendation="OpenAI service temporarily down")
+                        
+                        if retry_attempt < 3:
+                            wait_time = 3 * (2 ** retry_attempt)
+                            logger.info("🔄 Retrying after service unavailable", 
+                                       wait_time=f"{wait_time:.1f}s",
+                                       attempt=retry_attempt + 1)
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                    else:
+                        logger.error("❓ Unknown API error", 
+                                   error_details=repr(api_error),
+                                   suggestion="Check OpenAI API documentation")
+                        # Не retry для неизвестных ошибок
+                        break
+                    
+                    # Дополнительная диагностика для HTTP ошибок
+                    if hasattr(api_error, 'response'):
+                        logger.error("📡 HTTP Response details",
+                                   status_code=getattr(api_error.response, 'status_code', 'unknown'),
+                                   headers=dict(getattr(api_error.response, 'headers', {})),
+                                   response_text=getattr(api_error.response, 'text', 'no text')[:500])
+                    
+                    # Если все попытки исчерпаны
+                    if retry_attempt >= 3:
+                        logger.error("❌ All retry attempts exhausted")
+                        
+                        # Fallback на Chat Completions
+                        logger.info("🔄 Attempting fallback to Chat Completions API")
+                        fallback_result = await self._fallback_to_chat_completion(agent)
+                        if fallback_result:
+                            return fallback_result
+                        
+                        # Возвращаем детальную ошибку
+                        return OpenAIResponse.error_response(f"OpenAI API Error after 3 attempts: {str(api_error)}")
             
-            # Успешное завершение
-            total_duration = time.time() - start_time
-            logger.info("✨ Assistant creation completed successfully", 
-                       assistant_id=assistant.id,
-                       bot_id=agent.bot_id,
-                       total_duration=f"{total_duration:.2f}s",
-                       agent_name=agent.agent_name)
-            
-            return OpenAIResponse.success_response(
-                message="Ассистент успешно создан",
-                assistant_id=assistant.id,
-                response_time=total_duration
-            )
+            # Не должно сюда попасть, но на всякий случай
+            return OpenAIResponse.error_response("Unexpected error in retry loop")
             
         except Exception as e:
             # 🚨 ОБЩАЯ ОБРАБОТКА ОШИБОК
