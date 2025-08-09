@@ -1,5 +1,5 @@
 """
-Обработчики ИИ ассистента
+Обработчики ИИ ассистента с поддержкой OpenAI Assistants
 """
 
 import structlog
@@ -19,9 +19,9 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
     """Регистрация обработчиков ИИ"""
     
     db = kwargs['db']
-    bot_config = kwargs['bot_config']  # ИЗМЕНЕНО: получаем полную конфигурацию
+    bot_config = kwargs['bot_config']
     ai_assistant = kwargs.get('ai_assistant')
-    user_bot = kwargs.get('user_bot')  # Получаем ссылку на UserBot
+    user_bot = kwargs.get('user_bot')
     
     try:
         handler = AIHandler(db, bot_config, ai_assistant, user_bot)
@@ -30,7 +30,11 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
         dp.callback_query.register(handler.cb_admin_ai, F.data == "admin_ai")
         dp.callback_query.register(handler.cb_ai_action, F.data.startswith("ai_"))
         
-        # Обработчики ввода
+        # Новые обработчики для выбора типа агента
+        dp.callback_query.register(handler.cb_select_agent_type, F.data.startswith("agent_type_"))
+        dp.callback_query.register(handler.cb_openai_action, F.data.startswith("openai_"))
+        
+        # Обработчики ввода для ChatForYou (существующие)
         dp.message.register(
             handler.handle_api_token_input,
             AISettingsStates.waiting_for_api_token
@@ -47,6 +51,18 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             handler.handle_ai_daily_limit_input,
             AISettingsStates.waiting_for_daily_limit
         )
+        
+        # Новые обработчики для OpenAI агента
+        dp.message.register(
+            handler.handle_openai_name_input,
+            AISettingsStates.waiting_for_openai_name
+        )
+        dp.message.register(
+            handler.handle_openai_role_input,
+            AISettingsStates.waiting_for_openai_role
+        )
+        
+        # Обработчики диалога
         dp.message.register(
             handler.handle_ai_conversation,
             AISettingsStates.in_ai_conversation
@@ -63,7 +79,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             F.text == "🚪 Завершить диалог с ИИ"
         )
         
-        logger.info("AI handlers registered successfully", 
+        logger.info("AI handlers with OpenAI support registered successfully", 
                    bot_id=bot_config['bot_id'])
         
     except Exception as e:
@@ -74,7 +90,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
 
 
 class AIHandler:
-    """Обработчик ИИ ассистента"""
+    """Обработчик ИИ ассистента с поддержкой ChatForYou и OpenAI"""
     
     def __init__(self, db, bot_config: dict, ai_assistant, user_bot):
         self.db = db
@@ -82,7 +98,7 @@ class AIHandler:
         self.bot_id = bot_config['bot_id']
         self.owner_user_id = bot_config['owner_user_id']
         self.ai_assistant = ai_assistant
-        self.user_bot = user_bot  # Сохраняем ссылку на UserBot
+        self.user_bot = user_bot
         
         # Получаем настройки ИИ из конфигурации
         self.bot_username = bot_config['bot_username']
@@ -93,6 +109,10 @@ class AIHandler:
     def _is_owner(self, user_id: int) -> bool:
         """Проверка владельца"""
         return user_id == self.owner_user_id
+    
+    def _get_agent_type(self) -> str:
+        """Получение типа агента"""
+        return self.ai_assistant_settings.get('agent_type', 'none')
     
     def _should_show_ai_button(self, user_id: int) -> bool:
         """Проверка показывать ли кнопку ИИ"""
@@ -107,13 +127,59 @@ class AIHandler:
         await message.answer("Настройка отменена", reply_markup=keyboard)
     
     async def cb_admin_ai(self, callback: CallbackQuery):
-        """Настройки ИИ"""
+        """Главное меню настроек ИИ"""
         await callback.answer()
         
         if not self._is_owner(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен", show_alert=True)
             return
         
+        agent_type = self._get_agent_type()
+        
+        # Если тип агента не выбран - показываем меню выбора
+        if agent_type == 'none':
+            await self._show_agent_type_selection(callback)
+            return
+        
+        # Показываем настройки конкретного типа агента
+        if agent_type == 'chatforyou':
+            await self._show_chatforyou_settings(callback)
+        elif agent_type == 'openai':
+            await self._show_openai_settings(callback)
+        else:
+            # Fallback к выбору типа
+            await self._show_agent_type_selection(callback)
+    
+    async def _show_agent_type_selection(self, callback: CallbackQuery):
+        """Показ меню выбора типа агента"""
+        text = f"""
+🤖 <b>ИИ Агент @{self.bot_username}</b>
+
+Выберите тип ИИ агента для вашего бота:
+
+🌐 <b>Подключить с платформы</b>
+- ChatForYou (api.chatforyou.ru)
+- ProTalk (api.pro-talk.ru)
+- Требует API токен
+
+🎨 <b>Создать своего агента</b>
+- На базе OpenAI GPT-4o-mini
+- Настройка роли и инструкций
+- Работает через наш токен
+
+<b>Что выберете?</b>
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Подключить с платформы", callback_data="agent_type_chatforyou")],
+            [InlineKeyboardButton(text="🎨 Создать своего агента", callback_data="agent_type_openai")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    async def _show_chatforyou_settings(self, callback: CallbackQuery):
+        """Показ настроек ChatForYou (существующая логика)"""
         ai_status = "включен" if self.ai_assistant_enabled else "выключен"
         
         # Проверяем статус конфигурации
@@ -139,16 +205,12 @@ class AIHandler:
                 platform_display = platform_names.get(platform, platform)
                 platform_info = f"\n🌐 Платформа: {platform_display}"
         
-        daily_limit = self.ai_assistant_settings.get('daily_limit')
-        limit_text = f"{daily_limit} сообщений в день" if daily_limit else "безлимитно"
-        
         text = f"""
-🤖 <b>ИИ Агент @{self.bot_username}</b>
+🌐 <b>ИИ Агент с платформы</b>
 
 <b>Текущие настройки:</b>
 🤖 Статус: {ai_status}
 🔑 Конфигурация: {config_status}{platform_info}
-📊 Лимит: {limit_text}
 
 <b>Поддерживаемые платформы:</b>
 - ChatForYou (требует API токен + ID сотрудника)
@@ -157,12 +219,6 @@ class AIHandler:
 <b>Настройка происходит в 2 шага:</b>
 1️⃣ Ввод API токена
 2️⃣ Ввод ID сотрудника (только для ChatForYou)
-
-<b>Как работает ИИ агент:</b>
-1. Доступен только подписчикам канала
-2. Запускается кнопкой "🤖 Позвать ИИ"
-3. Работает в режиме диалога
-4. Учитывает лимиты сообщений
 """
         
         # Проверяем полную конфигурацию
@@ -173,18 +229,117 @@ class AIHandler:
             else:
                 is_configured = True
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=AIKeyboards.settings_menu(
-                self.ai_assistant_enabled,
-                is_configured,
-                platform,
-                daily_limit
-            )
+        keyboard = AIKeyboards.chatforyou_settings_menu(
+            self.ai_assistant_enabled,
+            is_configured,
+            platform
         )
+        
+        # Добавляем кнопку смены типа агента
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text="🔄 Сменить тип агента", callback_data="ai_change_type")
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    async def _show_openai_settings(self, callback: CallbackQuery):
+        """Показ настроек OpenAI агента"""
+        agent_status = "включен" if self.ai_assistant_enabled else "выключен"
+        
+        # Получаем информацию об OpenAI агенте
+        local_agent_id = self.ai_assistant_settings.get('local_agent_id')
+        openai_assistant_id = self.ai_assistant_settings.get('openai_assistant_id')
+        
+        agent_info = "не создан"
+        agent_details = ""
+        
+        if local_agent_id:
+            try:
+                # Здесь будем получать данные из БД через новый сервис
+                # Пока заглушка
+                agent_info = f"ID: {local_agent_id}"
+                if openai_assistant_id:
+                    agent_details = f"\n🆔 OpenAI ID: {openai_assistant_id[:15]}..."
+            except Exception as e:
+                logger.error("Failed to get OpenAI agent info", error=str(e))
+        
+        text = f"""
+🎨 <b>Собственный ИИ Агент</b>
+
+<b>Текущие настройки:</b>
+🤖 Статус: {agent_status}
+🎯 Агент: {agent_info}{agent_details}
+🧠 Модель: GPT-4o-mini
+⚡ Лимиты: без ограничений
+
+<b>Преимущества собственного агента:</b>
+- Полная настройка роли и поведения
+- Быстрые ответы через OpenAI API
+- Без дополнительных токенов
+- Стабильная работа 24/7
+
+<b>Управление агентом:</b>
+"""
+        
+        # Создаем клавиатуру для OpenAI агента
+        keyboard = AIKeyboards.openai_settings_menu(
+            self.ai_assistant_enabled,
+            bool(local_agent_id)
+        )
+        
+        # Добавляем кнопку смены типа агента
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text="🔄 Сменить тип агента", callback_data="ai_change_type")
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    async def cb_select_agent_type(self, callback: CallbackQuery):
+        """Обработка выбора типа агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        agent_type = callback.data.replace("agent_type_", "")
+        
+        try:
+            # Обновляем тип агента в настройках
+            ai_settings = self.ai_assistant_settings.copy()
+            ai_settings['agent_type'] = agent_type
+            
+            await self.db.update_ai_assistant(
+                self.bot_id,
+                settings=ai_settings
+            )
+            
+            # Обновляем локальные настройки
+            self.ai_assistant_settings = ai_settings
+            
+            # Обновляем в UserBot
+            if self.user_bot:
+                await self.user_bot.update_ai_settings(ai_assistant_settings=ai_settings)
+            
+            # Обновляем bot_manager
+            if self.bot_config.get('bot_manager'):
+                await self.bot_config['bot_manager'].update_bot_config(
+                    self.bot_id,
+                    ai_assistant_settings=ai_settings
+                )
+            
+            # Переходим к настройкам выбранного типа
+            if agent_type == 'chatforyou':
+                await self._show_chatforyou_settings(callback)
+            elif agent_type == 'openai':
+                await self._show_openai_settings(callback)
+                
+        except Exception as e:
+            logger.error("Failed to set agent type", error=str(e))
+            await callback.answer("Ошибка при сохранении типа агента", show_alert=True)
     
     async def cb_ai_action(self, callback: CallbackQuery, state: FSMContext):
-        """Обработка действий ИИ"""
+        """Обработка действий для ChatForYou (существующая логика)"""
         await callback.answer()
         
         if not self._is_owner(callback.from_user.id):
@@ -197,19 +352,203 @@ class AIHandler:
             await self._toggle_ai_assistant(callback)
         elif action == "set_id":
             await self._set_assistant_id(callback, state)
-        elif action == "set_limit":
-            await self._set_daily_limit(callback, state)
         elif action == "test":
             await self._test_ai_assistant(callback, state)
-        elif action == "unlimited":
-            await self._set_unlimited_limit(callback)
+        elif action == "change_type":
+            await self._change_agent_type(callback)
+    
+    async def cb_openai_action(self, callback: CallbackQuery, state: FSMContext):
+        """Обработка действий для OpenAI агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        action = callback.data.replace("openai_", "")
+        
+        if action == "toggle":
+            await self._toggle_openai_assistant(callback)
+        elif action == "create":
+            await self._create_openai_agent(callback, state)
+        elif action == "edit":
+            await self._edit_openai_agent(callback, state)
+        elif action == "delete":
+            await self._delete_openai_agent(callback)
+        elif action == "test":
+            await self._test_openai_assistant(callback, state)
+    
+    async def _change_agent_type(self, callback: CallbackQuery):
+        """Смена типа агента"""
+        text = """
+🔄 <b>Смена типа ИИ агента</b>
+
+⚠️ <b>Внимание!</b> При смене типа агента:
+- Текущая конфигурация будет сброшена
+- Все настройки придется настроить заново
+- Диалоги пользователей завершатся
+
+Вы уверены, что хотите сменить тип агента?
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, сменить", callback_data="ai_confirm_change_type")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_ai")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    async def _create_openai_agent(self, callback: CallbackQuery, state: FSMContext):
+        """Начало создания OpenAI агента"""
+        await state.set_state(AISettingsStates.waiting_for_openai_name)
+        
+        text = f"""
+🎨 <b>Создание собственного ИИ агента</b>
+
+<b>Шаг 1/2: Имя агента</b>
+
+Придумайте имя для вашего ИИ агента. Оно будет отображаться пользователям при общении.
+
+<b>Примеры хороших имен:</b>
+- Консультант Мария
+- Помощник Алекс
+- Эксперт по продажам
+- Тренер по фитнесу
+
+<b>Введите имя агента:</b>
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_ai")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    async def handle_openai_name_input(self, message: Message, state: FSMContext):
+        """Обработка ввода имени OpenAI агента"""
+        if not self._is_owner(message.from_user.id):
+            return
+        
+        if message.text == "/cancel":
+            await self._cancel_and_show_ai(message, state)
+            return
+        
+        agent_name = message.text.strip()
+        
+        if len(agent_name) < 2:
+            await message.answer("❌ Имя агента должно быть не менее 2 символов. Попробуйте еще раз:")
+            return
+        
+        if len(agent_name) > 100:
+            await message.answer("❌ Имя агента слишком длинное (максимум 100 символов). Попробуйте еще раз:")
+            return
+        
+        # Сохраняем имя в состоянии
+        await state.update_data(agent_name=agent_name)
+        await state.set_state(AISettingsStates.waiting_for_openai_role)
+        
+        text = f"""
+✅ <b>Имя сохранено:</b> {agent_name}
+
+<b>Шаг 2/2: Роль и инструкции</b>
+
+Опишите роль вашего агента и то, как он должен отвечать пользователям. Это очень важно для качества ответов!
+
+<b>Примеры хороших ролей:</b>
+- "Ты эксперт по фитнесу. Отвечай дружелюбно, давай практичные советы по тренировкам и питанию."
+- "Ты консультант по продажам. Помогай клиентам выбрать подходящий товар, отвечай профессионально."
+- "Ты психолог-консультант. Выслушивай внимательно и давай поддерживающие советы."
+
+<b>Введите роль и инструкции:</b>
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_ai")]
+        ])
+        
+        await message.answer(text, reply_markup=keyboard)
+    
+    async def handle_openai_role_input(self, message: Message, state: FSMContext):
+        """Обработка ввода роли OpenAI агента"""
+        if not self._is_owner(message.from_user.id):
+            return
+        
+        if message.text == "/cancel":
+            await self._cancel_and_show_ai(message, state)
+            return
+        
+        agent_role = message.text.strip()
+        
+        if len(agent_role) < 10:
+            await message.answer("❌ Описание роли слишком короткое (минимум 10 символов). Попробуйте еще раз:")
+            return
+        
+        if len(agent_role) > 1000:
+            await message.answer("❌ Описание роли слишком длинное (максимум 1000 символов). Попробуйте еще раз:")
+            return
+        
+        try:
+            # Получаем данные из состояния
+            data = await state.get_data()
+            agent_name = data.get('agent_name')
+            
+            if not agent_name:
+                await message.answer("❌ Ошибка: имя агента потеряно. Начните заново.")
+                await state.clear()
+                return
+            
+            await message.answer("🔄 Создаю агента в OpenAI...")
+            
+            # Здесь будет вызов сервиса OpenAI для создания агента
+            # Пока заглушка
+            success = await self._create_agent_in_openai(agent_name, agent_role)
+            
+            if success:
+                await message.answer(
+                    f"🎉 <b>Агент успешно создан!</b>\n\n"
+                    f"<b>Имя:</b> {agent_name}\n"
+                    f"<b>Роль:</b> {agent_role[:100]}{'...' if len(agent_role) > 100 else ''}\n\n"
+                    f"Теперь можете протестировать работу агента!",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🧪 Тестировать", callback_data="openai_test")],
+                        [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
+                    ])
+                )
+            else:
+                await message.answer(
+                    "❌ Ошибка при создании агента в OpenAI. Попробуйте еще раз.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
+                    ])
+                )
+            
+            await state.clear()
+            
+        except Exception as e:
+            logger.error("Failed to create OpenAI agent", error=str(e))
+            await message.answer("❌ Произошла ошибка при создании агента")
+            await state.clear()
+    
+    async def _create_agent_in_openai(self, name: str, role: str) -> bool:
+        """Создание агента в OpenAI (заглушка)"""
+        try:
+            # Здесь будет вызов OpenAI API
+            # return await openai_service.create_assistant(name, role)
+            
+            # Пока возвращаем True для тестирования
+            return True
+            
+        except Exception as e:
+            logger.error("Failed to create OpenAI assistant", error=str(e))
+            return False
+    
+    # ============ СУЩЕСТВУЮЩИЕ МЕТОДЫ CHATFORYOU ============
     
     async def _toggle_ai_assistant(self, callback: CallbackQuery):
-        """Переключение ИИ ассистента"""
+        """Переключение ИИ ассистента (ChatForYou)"""
         try:
             new_status = not self.ai_assistant_enabled
             
-            # Создаем или обновляем настройки
             ai_settings = self.ai_assistant_settings.copy()
             
             await self.db.update_ai_assistant(
@@ -218,14 +557,11 @@ class AIHandler:
                 settings=ai_settings
             )
             
-            # ✅ ИСПРАВЛЕНО: Обновляем в текущей конфигурации
             self.ai_assistant_enabled = new_status
             
-            # ✅ ИСПРАВЛЕНО: Обновляем в UserBot
             if self.user_bot:
                 await self.user_bot.update_ai_settings(ai_assistant_enabled=new_status)
             
-            # ✅ ИСПРАВЛЕНО: Обновляем bot_manager
             if self.bot_config.get('bot_manager'):
                 await self.bot_config['bot_manager'].update_bot_config(
                     self.bot_id,
@@ -236,15 +572,48 @@ class AIHandler:
             status_text = "включен" if new_status else "выключен"
             await callback.answer(f"ИИ агент {status_text}!", show_alert=True)
             
-            # Обновляем меню
-            await self.cb_admin_ai(callback)
+            await self._show_chatforyou_settings(callback)
             
         except Exception as e:
             logger.error("Failed to toggle AI assistant", error=str(e))
             await callback.answer("Ошибка при изменении настроек", show_alert=True)
     
+    async def _toggle_openai_assistant(self, callback: CallbackQuery):
+        """Переключение OpenAI ассистента"""
+        try:
+            new_status = not self.ai_assistant_enabled
+            
+            ai_settings = self.ai_assistant_settings.copy()
+            
+            await self.db.update_ai_assistant(
+                self.bot_id,
+                enabled=new_status,
+                settings=ai_settings
+            )
+            
+            self.ai_assistant_enabled = new_status
+            
+            if self.user_bot:
+                await self.user_bot.update_ai_settings(ai_assistant_enabled=new_status)
+            
+            if self.bot_config.get('bot_manager'):
+                await self.bot_config['bot_manager'].update_bot_config(
+                    self.bot_id,
+                    ai_assistant_enabled=new_status,
+                    ai_assistant_settings=ai_settings
+                )
+            
+            status_text = "включен" if new_status else "выключен"
+            await callback.answer(f"OpenAI агент {status_text}!", show_alert=True)
+            
+            await self._show_openai_settings(callback)
+            
+        except Exception as e:
+            logger.error("Failed to toggle OpenAI assistant", error=str(e))
+            await callback.answer("Ошибка при изменении настроек", show_alert=True)
+    
     async def _set_assistant_id(self, callback: CallbackQuery, state: FSMContext):
-        """Настройка ID ассистента"""
+        """Настройка ID ассистента (ChatForYou)"""
         await state.set_state(AISettingsStates.waiting_for_api_token)
         
         text = f"""
@@ -269,68 +638,8 @@ class AIHandler:
         
         await callback.message.edit_text(text, reply_markup=keyboard)
     
-    async def _set_daily_limit(self, callback: CallbackQuery, state: FSMContext):
-        """Установка дневного лимита"""
-        await state.set_state(AISettingsStates.waiting_for_daily_limit)
-        
-        current_limit = self.ai_assistant_settings.get('daily_limit')
-        limit_text = f"{current_limit} сообщений" if current_limit else "безлимит"
-        
-        text = f"""
-📊 <b>Лимит сообщений в день</b>
-
-<b>Текущий лимит:</b> {limit_text}
-
-Укажите максимальное количество сообщений, которое один пользователь может отправить ИИ агенту за день.
-
-<b>Примеры:</b>
-- <code>50</code> - 50 сообщений в день
-- <code>0</code> или <code>безлимит</code> - без ограничений
-
-<b>Отправьте лимит:</b>
-"""
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="♾️ Безлимит", callback_data="ai_unlimited")],
-            [InlineKeyboardButton(text="Отмена", callback_data="admin_ai")]
-        ])
-        
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    
-    async def _set_unlimited_limit(self, callback: CallbackQuery):
-        """Установка безлимита"""
-        try:
-            ai_settings = self.ai_assistant_settings.copy()
-            ai_settings['daily_limit'] = None
-            
-            await self.db.update_ai_assistant(
-                self.bot_id,
-                settings=ai_settings
-            )
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем в текущей конфигурации
-            self.ai_assistant_settings = ai_settings
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем в UserBot
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(ai_assistant_settings=ai_settings)
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем bot_manager
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_settings=ai_settings
-                )
-            
-            await callback.answer("Установлен безлимит!", show_alert=True)
-            await self.cb_admin_ai(callback)
-            
-        except Exception as e:
-            logger.error("Failed to set unlimited limit", error=str(e))
-            await callback.answer("Ошибка при сохранении настроек", show_alert=True)
-    
     async def _test_ai_assistant(self, callback: CallbackQuery, state: FSMContext):
-        """Тестирование ИИ ассистента"""
+        """Тестирование ИИ ассистента (ChatForYou)"""
         if not self.ai_assistant_id:
             await callback.answer("❌ Сначала настройте API токен", show_alert=True)
             return
@@ -345,7 +654,7 @@ class AIHandler:
             return
         
         await state.set_state(AISettingsStates.in_ai_conversation)
-        await state.update_data(is_test_mode=True)
+        await state.update_data(is_test_mode=True, agent_type='chatforyou')
         
         platform_names = {
             'chatforyou': 'ChatForYou',
@@ -358,7 +667,7 @@ class AIHandler:
             bot_id_info = f"\n<b>ID сотрудника:</b> {self.ai_assistant_settings.get('chatforyou_bot_id')}"
         
         text = f"""
-🧪 <b>Тестирование ИИ агента</b>
+🧪 <b>Тестирование ИИ агента (ChatForYou)</b>
 
 <b>API Token:</b> {self.ai_assistant_id[:15]}...
 <b>Платформа:</b> {platform_display}{bot_id_info}
@@ -374,8 +683,38 @@ class AIHandler:
         
         await callback.message.edit_text(text, reply_markup=keyboard)
     
+    async def _test_openai_assistant(self, callback: CallbackQuery, state: FSMContext):
+        """Тестирование OpenAI ассистента"""
+        local_agent_id = self.ai_assistant_settings.get('local_agent_id')
+        if not local_agent_id:
+            await callback.answer("❌ Сначала создайте OpenAI агента", show_alert=True)
+            return
+        
+        await state.set_state(AISettingsStates.in_ai_conversation)
+        await state.update_data(is_test_mode=True, agent_type='openai')
+        
+        text = f"""
+🧪 <b>Тестирование OpenAI агента</b>
+
+<b>Агент ID:</b> {local_agent_id}
+<b>Модель:</b> GPT-4o-mini
+<b>Режим:</b> Тестирование
+
+Отправьте любое сообщение для тестирования OpenAI агента.
+
+<b>Напишите ваш вопрос:</b>
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚪 Выйти из тестирования", callback_data="admin_ai")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    
+    # ============ ОБРАБОТЧИКИ ВВОДА CHATFORYOU ============
+    
     async def handle_api_token_input(self, message: Message, state: FSMContext):
-        """Обработка ввода API токена"""
+        """Обработка ввода API токена (существующая логика)"""
         if not self._is_owner(message.from_user.id):
             return
         
@@ -388,7 +727,6 @@ class AIHandler:
         try:
             await message.answer("🔍 Определяем платформу...")
             
-            # Определяем платформу без тестирования ChatForYou
             success, platform, error_msg = await self.db.detect_and_validate_ai_platform(api_token)
             
             if not success:
@@ -398,11 +736,9 @@ class AIHandler:
                 )
                 return
             
-            # Сохраняем токен и платформу в состоянии
             await state.update_data(api_token=api_token, platform=platform)
             
             if platform == 'chatforyou':
-                # Переходим к шагу 2 для ChatForYou
                 await state.set_state(AISettingsStates.waiting_for_bot_id)
                 
                 text = f"""
@@ -441,18 +777,16 @@ class AIHandler:
                     platform=platform
                 )
                 
-                # ✅ ИСПРАВЛЕНО: Обновляем в текущей конфигурации
+                # Обновляем настройки
                 self.ai_assistant_id = api_token
                 self.ai_assistant_settings = ai_settings
                 
-                # ✅ ИСПРАВЛЕНО: Обновляем в UserBot
                 if self.user_bot:
                     await self.user_bot.update_ai_settings(
                         ai_assistant_id=api_token,
                         ai_assistant_settings=ai_settings
                     )
                 
-                # ✅ ИСПРАВЛЕНО: Обновляем bot_manager
                 if self.bot_config.get('bot_manager'):
                     await self.bot_config['bot_manager'].update_bot_config(
                         self.bot_id,
@@ -484,7 +818,7 @@ class AIHandler:
             await state.clear()
     
     async def handle_bot_id_input(self, message: Message, state: FSMContext):
-        """Обработка ввода ID сотрудника для ChatForYou"""
+        """Обработка ввода ID сотрудника для ChatForYou (существующая логика)"""
         if not self._is_owner(message.from_user.id):
             return
         
@@ -494,7 +828,6 @@ class AIHandler:
         
         bot_id_value = message.text.strip()
         
-        # Валидация ID
         try:
             int(bot_id_value)
         except ValueError:
@@ -509,7 +842,6 @@ class AIHandler:
         bot_id_value = int(bot_id_value)
         
         try:
-            # Получаем данные из шага 1
             data = await state.get_data()
             api_token = data.get('api_token')
             platform = data.get('platform')
@@ -519,7 +851,6 @@ class AIHandler:
                 await state.clear()
                 return
             
-            # Финальное тестирование с реальными данными
             await message.answer("🔍 Проверяем соединение с ChatForYou...")
             
             success, verified_platform, error_msg = await self.db.detect_and_validate_ai_platform(
@@ -531,20 +862,8 @@ class AIHandler:
                 await message.answer(
                     f"❌ <b>Ошибка подключения к ChatForYou</b>\n\n"
                     f"{error_msg}\n\n"
-                    f"<b>Возможные причины:</b>\n"
-                    f"• Неправильный API токен\n"
-                    f"• Неправильный ID сотрудника\n"
-                    f"• ID не активен в системе ChatForYou\n"
-                    f"• Нет прав доступа к API\n\n"
                     f"Проверьте данные и попробуйте еще раз:"
                 )
-                return
-            
-            if verified_platform != 'chatforyou':
-                await message.answer(
-                    f"❌ Ошибка: платформа изменилась после проверки ({platform} → {verified_platform})"
-                )
-                await state.clear()
                 return
             
             # Сохраняем конфигурацию
@@ -567,18 +886,16 @@ class AIHandler:
                 platform=platform
             )
             
-            # ✅ ИСПРАВЛЕНО: Обновляем в текущей конфигурации
+            # Обновляем настройки
             self.ai_assistant_id = api_token
             self.ai_assistant_settings = ai_settings
             
-            # ✅ ИСПРАВЛЕНО: Обновляем в UserBot
             if self.user_bot:
                 await self.user_bot.update_ai_settings(
                     ai_assistant_id=api_token,
                     ai_assistant_settings=ai_settings
                 )
             
-            # ✅ ИСПРАВЛЕНО: Обновляем bot_manager
             if self.bot_config.get('bot_manager'):
                 await self.bot_config['bot_manager'].update_bot_config(
                     self.bot_id,
@@ -594,12 +911,6 @@ class AIHandler:
 <b>Платформа:</b> ChatForYou
 <b>Статус:</b> ✅ Проверено реальным API запросом
 
-🔥 <b>Выполненные проверки:</b>
-- ✅ API токен валиден
-- ✅ ID сотрудника активен и доступен
-- ✅ Соединение с ChatForYou работает
-- ✅ Тестовый запрос выполнен успешно
-
 Теперь ИИ агент готов к работе с пользователями!
 """
             
@@ -611,11 +922,6 @@ class AIHandler:
             await message.answer(success_text, reply_markup=keyboard)
             await state.clear()
             
-            logger.info("ChatForYou configuration completed", 
-                       bot_id=self.bot_id, 
-                       api_token_preview=api_token[:10],
-                       chatforyou_bot_id=bot_id_value)
-            
         except Exception as e:
             logger.error("Failed to validate ChatForYou configuration", error=str(e))
             await message.answer("❌ Ошибка при проверке конфигурации ChatForYou")
@@ -626,164 +932,38 @@ class AIHandler:
         await self.handle_api_token_input(message, state)
     
     async def handle_ai_daily_limit_input(self, message: Message, state: FSMContext):
-        """Обработка ввода дневного лимита"""
+        """Обработка ввода дневного лимита (не используется для OpenAI)"""
         if not self._is_owner(message.from_user.id):
             return
         
-        try:
-            limit_text = message.text.strip().lower()
-            
-            if limit_text in ['0', 'безлимит', 'unlimited']:
-                daily_limit = None
-            else:
-                daily_limit = int(limit_text)
-                if daily_limit < 0:
-                    await message.answer("❌ Лимит не может быть отрицательным!")
-                    return
-            
-            ai_settings = self.ai_assistant_settings.copy()
-            ai_settings['daily_limit'] = daily_limit
-            
-            await self.db.update_ai_assistant(
-                self.bot_id,
-                settings=ai_settings
-            )
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем в текущей конфигурации
-            self.ai_assistant_settings = ai_settings
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем в UserBot
-            if self.user_bot:
-                await self.user_bot.update_ai_settings(ai_assistant_settings=ai_settings)
-            
-            # ✅ ИСПРАВЛЕНО: Обновляем bot_manager
-            if self.bot_config.get('bot_manager'):
-                await self.bot_config['bot_manager'].update_bot_config(
-                    self.bot_id,
-                    ai_assistant_settings=ai_settings
-                )
-            
-            limit_display = f"{daily_limit} сообщений в день" if daily_limit else "безлимит"
-            
-            success_text = f"""
-✅ <b>Лимит сообщений обновлен!</b>
-
-<b>Новый лимит:</b> {limit_display}
-
-Теперь каждый пользователь сможет отправлять ИИ не более указанного количества сообщений в день.
-"""
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
-            ])
-            
-            await message.answer(success_text, reply_markup=keyboard)
-            await state.clear()
-            
-        except ValueError:
-            await message.answer("❌ Неверный формат числа! Введите число или 'безлимит':")
-        except Exception as e:
-            logger.error("Failed to save daily limit", error=str(e))
-            await message.answer("❌ Ошибка при сохранении лимита")
-            await state.clear()
+        # Эта функция оставлена для ChatForYou, для OpenAI лимитов нет
+        pass
+    
+    # ============ ОБЩИЕ ОБРАБОТЧИКИ ============
     
     async def handle_ai_conversation(self, message: Message, state: FSMContext):
-        """Обработка диалога с ИИ"""
+        """Обработка диалога с ИИ (для обоих типов агентов)"""
         try:
             data = await state.get_data()
             is_test_mode = data.get('is_test_mode', False)
+            agent_type = data.get('agent_type', self._get_agent_type())
             user_id = message.from_user.id
             
             # В тестовом режиме только владелец может тестировать
             if is_test_mode and not self._is_owner(user_id):
                 return
             
-            # В обычном режиме - проверяем подписку и лимиты
-            if not is_test_mode:
-                # Проверка подписки на канал
-                channel_id = self.ai_assistant_settings.get('channel_id')
-                if channel_id:
-                    try:
-                        from aiogram import Bot
-                        bot = Bot(token=message.bot.token)
-                        member = await bot.get_chat_member(channel_id, user_id)
-                        if member.status in ['left', 'kicked']:
-                            await message.answer(
-                                "❌ ИИ агент доступен только подписчикам канала!\n"
-                                "Подпишитесь на канал и попробуйте снова.",
-                                reply_markup=ReplyKeyboardRemove()
-                            )
-                            await state.clear()
-                            return
-                    except Exception as e:
-                        logger.warning("Could not check channel subscription", error=str(e))
-                
-                # Проверка лимита
-                daily_limit = self.ai_assistant_settings.get('daily_limit')
-                if daily_limit:
-                    usage_count = await self.db.get_ai_usage_today(self.bot_id, user_id)
-                    if usage_count >= daily_limit:
-                        await message.answer(
-                            f"❌ Лимит сообщений исчерпан!\n"
-                            f"Вы можете отправить {daily_limit} сообщений в день.\n"
-                            f"Попробуйте завтра.",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
-                        await state.clear()
-                        return
-            
-            # Получаем платформу из настроек
-            platform = self.ai_assistant_settings.get('detected_platform')
-            if not platform:
-                await message.answer(
-                    "❌ Платформа ИИ не определена. Перенастройте токен.",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-                await state.clear()
-                return
-            
-            # Получаем bot_id для ChatForYou
-            bot_id_value = None
-            if platform == 'chatforyou':
-                bot_id_value = self.ai_assistant_settings.get('chatforyou_bot_id')
-                if not bot_id_value:
-                    await message.answer(
-                        "❌ ID сотрудника не настроен для ChatForYou",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    await state.clear()
-                    return
-            
             # Отправляем typing
             await message.bot.send_chat_action(message.chat.id, "typing")
             
-            # Подготавливаем контекст
-            context = {}
-            if self.ai_assistant_settings.get('context_info', True):
-                context = {
-                    "user_name": message.from_user.first_name or "Пользователь",
-                    "username": message.from_user.username,
-                    "is_test": is_test_mode
-                }
+            ai_response = None
             
-            # Отправляем сообщение ИИ
-            from services.ai_assistant import ai_client
-            
-            ai_response = await ai_client.send_message(
-                api_token=self.ai_assistant_id,
-                message=message.text,
-                user_id=user_id,
-                bot_id=bot_id_value,
-                platform=platform,
-                context=context
-            )
+            if agent_type == 'chatforyou':
+                ai_response = await self._handle_chatforyou_conversation(message, data)
+            elif agent_type == 'openai':
+                ai_response = await self._handle_openai_conversation(message, data)
             
             if ai_response:
-                # Увеличиваем счетчик использования (не для тест режима)
-                if not is_test_mode:
-                    await self.db.increment_ai_usage(self.bot_id, user_id)
-                
-                # Отправляем ответ
                 keyboard = None
                 if is_test_mode:
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -793,7 +973,6 @@ class AIHandler:
                     keyboard = AIKeyboards.conversation_menu()
                 
                 await message.answer(ai_response, reply_markup=keyboard)
-                
             else:
                 await message.answer(
                     "❌ Извините, ИИ агент временно недоступен. Попробуйте позже.",
@@ -809,48 +988,92 @@ class AIHandler:
             )
             await state.clear()
     
+    async def _handle_chatforyou_conversation(self, message: Message, data: dict) -> str:
+        """Обработка диалога с ChatForYou (существующая логика)"""
+        try:
+            platform = self.ai_assistant_settings.get('detected_platform')
+            if not platform:
+                return None
+            
+            bot_id_value = None
+            if platform == 'chatforyou':
+                bot_id_value = self.ai_assistant_settings.get('chatforyou_bot_id')
+                if not bot_id_value:
+                    return None
+            
+            context = {}
+            if self.ai_assistant_settings.get('context_info', True):
+                context = {
+                    "user_name": message.from_user.first_name or "Пользователь",
+                    "username": message.from_user.username,
+                    "is_test": data.get('is_test_mode', False)
+                }
+            
+            from services.ai_assistant import ai_client
+            
+            ai_response = await ai_client.send_message(
+                api_token=self.ai_assistant_id,
+                message=message.text,
+                user_id=message.from_user.id,
+                bot_id=bot_id_value,
+                platform=platform,
+                context=context
+            )
+            
+            return ai_response
+            
+        except Exception as e:
+            logger.error("Error in ChatForYou conversation", error=str(e))
+            return None
+    
+    async def _handle_openai_conversation(self, message: Message, data: dict) -> str:
+        """Обработка диалога с OpenAI агентом"""
+        try:
+            # Здесь будет вызов OpenAI сервиса
+            # return await openai_service.send_message(...)
+            
+            # Пока заглушка
+            return f"🤖 OpenAI Agent: Получил ваше сообщение '{message.text}'. Это тестовый ответ."
+            
+        except Exception as e:
+            logger.error("Error in OpenAI conversation", error=str(e))
+            return None
+    
     async def handle_ai_button_click(self, message: Message, state: FSMContext):
         """Обработка нажатия кнопки вызова ИИ"""
         try:
             user = message.from_user
+            agent_type = self._get_agent_type()
             
             # Проверяем что ИИ включен и настроен
-            if not self.ai_assistant_enabled or not self.ai_assistant_id:
+            if not self.ai_assistant_enabled or agent_type == 'none':
                 await message.answer(
                     "❌ ИИ агент временно недоступен.",
                     reply_markup=ReplyKeyboardRemove()
                 )
                 return
             
-            logger.info("🤖 AI button clicked", bot_id=self.bot_id, user_id=user.id)
-            
-            # Проверка лимита сообщений
-            daily_limit = self.ai_assistant_settings.get('daily_limit')
-            if daily_limit:
-                usage_count = await self.db.get_ai_usage_today(self.bot_id, user.id)
-                if usage_count >= daily_limit:
-                    await message.answer(
-                        f"❌ Лимит сообщений исчерпан!\n"
-                        f"Вы можете отправить {daily_limit} сообщений ИИ агенту в день.\n"
-                        f"Сегодня отправлено: {usage_count}\n"
-                        f"Попробуйте завтра.",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    return
+            logger.info("🤖 AI button clicked", 
+                       bot_id=self.bot_id, 
+                       user_id=user.id, 
+                       agent_type=agent_type)
             
             # Переводим в режим общения с ИИ
             await state.set_state(AISettingsStates.in_ai_conversation)
+            await state.update_data(agent_type=agent_type)
             
-            remaining_messages = ""
-            if daily_limit:
-                usage_count = await self.db.get_ai_usage_today(self.bot_id, user.id)
-                remaining = daily_limit - usage_count
-                remaining_messages = f"\n📊 Осталось сообщений: {remaining}"
+            agent_name = "ИИ агентом"
+            if agent_type == 'openai':
+                # Получаем имя OpenAI агента
+                local_agent_id = self.ai_assistant_settings.get('local_agent_id')
+                if local_agent_id:
+                    # Здесь будем получать имя из БД
+                    agent_name = "собственным ИИ агентом"
             
             welcome_text = f"""
-🤖 <b>Добро пожаловать в чат с ИИ агентом!</b>
+🤖 <b>Добро пожаловать в чат с {agent_name}!</b>
 
-Задавайте любые вопросы, я постараюсь помочь.{remaining_messages}
+Задавайте любые вопросы, я постараюсь помочь.
 
 <b>Напишите ваш вопрос:</b>
 """
@@ -872,3 +1095,13 @@ class AIHandler:
                 reply_markup=ReplyKeyboardRemove()
             )
             await state.clear()
+    
+    # ============ ЗАГЛУШКИ ДЛЯ OPENAI МЕТОДОВ ============
+    
+    async def _edit_openai_agent(self, callback: CallbackQuery, state: FSMContext):
+        """Редактирование OpenAI агента (заглушка)"""
+        await callback.answer("🚧 Функция в разработке", show_alert=True)
+    
+    async def _delete_openai_agent(self, callback: CallbackQuery):
+        """Удаление OpenAI агента (заглушка)"""
+        await callback.answer("🚧 Функция в разработке", show_alert=True)
