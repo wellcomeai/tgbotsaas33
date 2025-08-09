@@ -64,58 +64,98 @@ class UserBot(Base):
     goodbye_button_text = Column(String(255), nullable=True)  # Текст Inline кнопки
     goodbye_button_url = Column(String(500), nullable=True)   # Ссылка для Inline кнопки
     
-    # ✅ UPDATED: ИИ Ассистент с поддержкой двух платформ и раздельным хранением токенов
-    ai_assistant_id = Column(String(255), nullable=True)       # API_TOKEN
-    ai_assistant_bot_id = Column(Integer, nullable=True)       # ✅ ИСПРАВЛЕНО: bot_id как число для ChatForYou/ProTalk
+    # ✅ НОВАЯ СТРУКТУРА: ИИ Ассистент с разделением платформ
+    # === ОБЩИЕ ПОЛЯ ===
     ai_assistant_enabled = Column(Boolean, default=False, nullable=False)
-    ai_assistant_settings = Column(JSONB, nullable=True, default=lambda: {
-        # Основные настройки
-        'daily_limit': None,  # None = безлимит, число = лимит сообщений в день
-        'channel_id': None,   # ID канала для проверки подписки
-        'context_info': True, # Передавать ли контекст пользователя
+    ai_assistant_type = Column(String(50), nullable=True)  # 'openai', 'chatforyou', 'protalk'
+    
+    # === OPENAI ПОЛЯ ===
+    openai_agent_id = Column(String(255), nullable=True)           # Локальный ID агента
+    openai_agent_name = Column(String(255), nullable=True)         # Имя агента
+    openai_agent_instructions = Column(Text, nullable=True)        # Инструкции агента
+    openai_model = Column(String(100), default="gpt-4o")          # Модель OpenAI
+    openai_settings = Column(JSONB, nullable=True, default=lambda: {
+        # Основные настройки OpenAI
+        'temperature': 0.7,           # Креативность ответов
+        'max_tokens': 4000,           # Максимум токенов в ответе
+        'top_p': 1.0,                 # Nucleus sampling
+        'frequency_penalty': 0.0,     # Штраф за повторения
+        'presence_penalty': 0.0,      # Штраф за присутствие
         
-        # ✅ NEW: Настройки платформы
-        'api_service': None,  # Будет определено автоматически: 'chatforyou' или 'protalk'
-        'api_version': 'v1.0', # Версия API
+        # Настройки функций
+        'tools_enabled': True,        # Включить инструменты
+        'code_interpreter': False,    # Интерпретатор кода
+        'file_search': False,         # Поиск файлов
+        'function_calling': True,     # Вызов функций
         
-        # ✅ UPDATED: Отдельное хранение токенов и bot_id
-        'api_token': None,          # ✅ НОВОЕ: дублирование API_TOKEN для удобства
-        'chatforyou_bot_id': None,  # ✅ ИСПРАВЛЕНО: ID сотрудника ChatForYou как число
-        'protalk_bot_id': None,     # ✅ ИСПРАВЛЕНО: для ProTalk если нужно как число
+        # Ограничения и безопасность
+        'daily_limit': None,          # Лимит запросов в день
+        'channel_check': None,        # ID канала для проверки подписки
+        'context_info': True,         # Передавать контекст пользователя
+        'moderation_enabled': True,   # Включить модерацию контента
         
-        # ✅ NEW: Информация об определенной платформе
-        'detected_platform': None,  # 'chatforyou' или 'protalk'
-        'platform_detected_at': None,  # ISO дата/время определения платформы
-        'platform_detection_attempts': 0,  # Количество попыток определения
+        # Настройки производительности
+        'response_timeout': 60,       # Таймаут ответа в секундах
+        'stream_responses': False,    # Потоковые ответы
+        'async_processing': True,     # Асинхронная обработка
         
-        # ✅ NEW: Поддерживаемые платформы
-        'supported_platforms': ['chatforyou', 'protalk'],  # Список поддерживаемых платформ
+        # Статистика
+        'total_requests': 0,
+        'successful_requests': 0,
+        'failed_requests': 0,
+        'last_request_at': None,
         
-        # ✅ NEW: Настройки производительности
-        'response_timeout': 30,  # Таймаут ответа в секундах
-        'max_retries': 3,        # Максимальное количество повторных попыток
-        'retry_delay': 1.0,      # Задержка между попытками в секундах
+        # Настройки логирования
+        'log_conversations': True,
+        'log_errors': True,
+        'log_performance': False
+    })
+    
+    # === ВНЕШНИЕ ПЛАТФОРМЫ (CHATFORYOU/PROTALK) ===
+    external_api_token = Column(String(255), nullable=True)       # API токен внешней платформы
+    external_bot_id = Column(String(100), nullable=True)          # bot_id для внешней платформы
+    external_platform = Column(String(50), nullable=True)         # 'chatforyou' или 'protalk'
+    external_settings = Column(JSONB, nullable=True, default=lambda: {
+        # Основные настройки внешних платформ
+        'daily_limit': None,          # Лимит запросов в день
+        'channel_id': None,           # ID канала для проверки подписки
+        'context_info': True,         # Передавать контекст пользователя
         
-        # ✅ NEW: Статистика использования
-        'total_requests': 0,     # Общее количество запросов к ИИ
-        'successful_requests': 0, # Успешные запросы
-        'failed_requests': 0,    # Неудачные запросы
-        'last_request_at': None, # Дата/время последнего запроса
+        # Настройки API
+        'api_version': 'v1.0',        # Версия API
+        'auto_detect_platform': True, # Автоопределение платформы
         
-        # ✅ NEW: Настройки безопасности
-        'rate_limit_enabled': True,   # Включить ограничение скорости запросов
-        'rate_limit_requests': 60,    # Максимум запросов в минуту
-        'block_inappropriate': True,  # Блокировать неподходящий контент
+        # Настройки производительности
+        'response_timeout': 30,       # Таймаут ответа в секундах
+        'max_retries': 3,            # Максимальные повторные попытки
+        'retry_delay': 1.0,          # Задержка между попытками
         
-        # ✅ NEW: Экспериментальные настройки
-        'auto_platform_switch': False,  # Автоматическое переключение при сбоях
-        'fallback_enabled': True,       # Включить резервную платформу
-        'debug_mode': False,            # Режим отладки
+        # Статистика использования
+        'total_requests': 0,
+        'successful_requests': 0,
+        'failed_requests': 0,
+        'last_request_at': None,
         
-        # ✅ NEW: Настройки логирования
-        'log_conversations': True,      # Логировать диалоги
-        'log_errors': True,            # Логировать ошибки
-        'log_performance': False       # Логировать производительность
+        # Информация о платформе
+        'detected_platform': None,
+        'platform_detected_at': None,
+        'platform_detection_attempts': 0,
+        'supported_platforms': ['chatforyou', 'protalk'],
+        
+        # Настройки безопасности
+        'rate_limit_enabled': True,
+        'rate_limit_requests': 60,
+        'block_inappropriate': True,
+        
+        # Экспериментальные функции
+        'auto_platform_switch': False,
+        'fallback_enabled': True,
+        'debug_mode': False,
+        
+        # Настройки логирования
+        'log_conversations': True,
+        'log_errors': True,
+        'log_performance': False
     })
     
     # Analytics
@@ -184,164 +224,268 @@ class UserBot(Base):
             admins.extend([uid for uid in self.admin_users if uid != self.user_id])
         return admins
     
-    # ✅ UPDATED: AI Platform management methods with separate token/bot_id handling
-    def get_ai_platform(self) -> Optional[str]:
-        """Get detected AI platform"""
-        if self.ai_assistant_settings:
-            return self.ai_assistant_settings.get('detected_platform')
-        return None
+    # ✅ НОВЫЕ МЕТОДЫ: Управление AI ассистентом
     
-    def set_ai_platform(self, platform: str) -> None:
-        """Set AI platform with timestamp"""
-        if not self.ai_assistant_settings:
-            self.ai_assistant_settings = {}
-        
-        self.ai_assistant_settings.update({
-            'detected_platform': platform,
-            'platform_detected_at': datetime.now().isoformat(),
-            'api_service': platform.lower()
-        })
+    def get_ai_type(self) -> Optional[str]:
+        """Get AI assistant type"""
+        return self.ai_assistant_type
     
-    def get_ai_api_token(self) -> Optional[str]:
-        """Get AI API token from either column or settings"""
-        # Приоритет: колонка ai_assistant_id, затем настройки
-        if self.ai_assistant_id:
-            return self.ai_assistant_id
-        
-        if self.ai_assistant_settings:
-            return self.ai_assistant_settings.get('api_token')
-        
-        return None
-    
-    def set_ai_api_token(self, token: str) -> None:
-        """Set AI API token in both column and settings"""
-        self.ai_assistant_id = token
-        
-        if not self.ai_assistant_settings:
-            self.ai_assistant_settings = {}
-        
-        self.ai_assistant_settings['api_token'] = token
-    
-    def get_ai_bot_id(self, platform: str = None) -> Optional[int]:
-        """Get AI bot_id for specific platform (returns integer)"""
-        # Если платформа не указана, пытаемся определить автоматически
-        if not platform:
-            platform = self.get_ai_platform()
-        
-        if not platform:
-            return self.ai_assistant_bot_id  # Fallback to column value
-        
-        # Возвращаем bot_id для конкретной платформы
-        if platform.lower() == 'chatforyou':
-            if self.ai_assistant_settings:
-                bot_id = self.ai_assistant_settings.get('chatforyou_bot_id')
-                if bot_id is not None:
-                    return int(bot_id) if not isinstance(bot_id, int) else bot_id
-            return self.ai_assistant_bot_id
-        
-        elif platform.lower() == 'protalk':
-            if self.ai_assistant_settings:
-                bot_id = self.ai_assistant_settings.get('protalk_bot_id')
-                if bot_id is not None:
-                    return int(bot_id) if not isinstance(bot_id, int) else bot_id
-            return self.ai_assistant_bot_id
-        
-        return self.ai_assistant_bot_id
-    
-    def set_ai_bot_id(self, bot_id: int, platform: str = None) -> None:
-        """Set AI bot_id for specific platform (accepts integer)"""
-        # Конвертируем в int если передана строка
-        if isinstance(bot_id, str):
-            bot_id = int(bot_id)
-        
-        # Всегда сохраняем в основную колонку
-        self.ai_assistant_bot_id = bot_id
-        
-        if not self.ai_assistant_settings:
-            self.ai_assistant_settings = {}
-        
-        # Если платформа указана, сохраняем в соответствующее поле
-        if platform:
-            if platform.lower() == 'chatforyou':
-                self.ai_assistant_settings['chatforyou_bot_id'] = bot_id
-            elif platform.lower() == 'protalk':
-                self.ai_assistant_settings['protalk_bot_id'] = bot_id
-    
-    def get_ai_credentials(self, platform: str = None) -> dict:
-        """Get AI credentials (token + bot_id) for platform"""
-        return {
-            'api_token': self.get_ai_api_token(),
-            'bot_id': self.get_ai_bot_id(platform),
-            'platform': platform or self.get_ai_platform()
-        }
-    
-    def set_ai_credentials(self, api_token: str, bot_id: int = None, platform: str = None) -> None:
-        """Set AI credentials for platform"""
-        self.set_ai_api_token(api_token)
-        
-        if bot_id is not None:
-            self.set_ai_bot_id(bot_id, platform)
-        
-        if platform:
-            self.set_ai_platform(platform)
-    
-    def get_ai_stats(self) -> dict:
-        """Get AI usage statistics"""
-        if not self.ai_assistant_settings:
-            return {}
-        
-        return {
-            'total_requests': self.ai_assistant_settings.get('total_requests', 0),
-            'successful_requests': self.ai_assistant_settings.get('successful_requests', 0),
-            'failed_requests': self.ai_assistant_settings.get('failed_requests', 0),
-            'success_rate': self._calculate_ai_success_rate(),
-            'last_request_at': self.ai_assistant_settings.get('last_request_at'),
-            'platform': self.ai_assistant_settings.get('detected_platform')
-        }
-    
-    def _calculate_ai_success_rate(self) -> float:
-        """Calculate AI request success rate"""
-        if not self.ai_assistant_settings:
-            return 0.0
-        
-        total = self.ai_assistant_settings.get('total_requests', 0)
-        successful = self.ai_assistant_settings.get('successful_requests', 0)
-        
-        if total == 0:
-            return 0.0
-        
-        return (successful / total) * 100
-    
-    def increment_ai_request_stats(self, success: bool = True) -> None:
-        """Increment AI request statistics"""
-        if not self.ai_assistant_settings:
-            self.ai_assistant_settings = {}
-        
-        self.ai_assistant_settings['total_requests'] = self.ai_assistant_settings.get('total_requests', 0) + 1
-        self.ai_assistant_settings['last_request_at'] = datetime.now().isoformat()
-        
-        if success:
-            self.ai_assistant_settings['successful_requests'] = self.ai_assistant_settings.get('successful_requests', 0) + 1
-        else:
-            self.ai_assistant_settings['failed_requests'] = self.ai_assistant_settings.get('failed_requests', 0) + 1
+    def set_ai_type(self, ai_type: str) -> bool:
+        """Set AI assistant type"""
+        if ai_type in ['openai', 'chatforyou', 'protalk']:
+            self.ai_assistant_type = ai_type
+            return True
+        return False
     
     def is_ai_enabled(self) -> bool:
-        """Check if AI assistant is properly configured and enabled"""
-        return (
-            self.ai_assistant_enabled and 
-            self.get_ai_api_token() is not None and 
-            self.ai_assistant_settings is not None and
-            self.ai_assistant_settings.get('detected_platform') is not None
-        )
+        """Check if AI assistant is enabled and configured"""
+        if not self.ai_assistant_enabled or not self.ai_assistant_type:
+            return False
+        
+        if self.ai_assistant_type == 'openai':
+            return self.openai_agent_id is not None
+        elif self.ai_assistant_type in ['chatforyou', 'protalk']:
+            return (self.external_api_token is not None and 
+                   self.external_bot_id is not None and
+                   self.external_platform is not None)
+        
+        return False
+    
+    # === OPENAI МЕТОДЫ ===
+    
+    def setup_openai_assistant(self, agent_id: str, agent_name: str = None, 
+                              instructions: str = None, model: str = "gpt-4o") -> bool:
+        """Setup OpenAI assistant"""
+        self.ai_assistant_type = 'openai'
+        self.openai_agent_id = agent_id
+        self.openai_agent_name = agent_name
+        self.openai_agent_instructions = instructions
+        self.openai_model = model
+        
+        if not self.openai_settings:
+            self.openai_settings = {}
+        
+        return True
+    
+    def get_openai_agent_id(self) -> Optional[str]:
+        """Get OpenAI agent ID"""
+        return self.openai_agent_id if self.ai_assistant_type == 'openai' else None
+    
+    def get_openai_settings(self) -> dict:
+        """Get OpenAI specific settings"""
+        if self.ai_assistant_type == 'openai' and self.openai_settings:
+            return self.openai_settings
+        return {}
+    
+    def update_openai_settings(self, settings: dict) -> bool:
+        """Update OpenAI settings"""
+        if self.ai_assistant_type != 'openai':
+            return False
+        
+        if not self.openai_settings:
+            self.openai_settings = {}
+        
+        self.openai_settings.update(settings)
+        return True
+    
+    def get_openai_model(self) -> str:
+        """Get OpenAI model"""
+        return self.openai_model or "gpt-4o"
+    
+    def set_openai_model(self, model: str) -> bool:
+        """Set OpenAI model"""
+        if self.ai_assistant_type == 'openai':
+            self.openai_model = model
+            return True
+        return False
+    
+    # === ВНЕШНИЕ ПЛАТФОРМЫ МЕТОДЫ ===
+    
+    def setup_external_assistant(self, api_token: str, bot_id: str, platform: str) -> bool:
+        """Setup external AI platform (ChatForYou/ProTalk)"""
+        if platform not in ['chatforyou', 'protalk']:
+            return False
+        
+        self.ai_assistant_type = platform
+        self.external_api_token = api_token
+        self.external_bot_id = bot_id
+        self.external_platform = platform
+        
+        if not self.external_settings:
+            self.external_settings = {}
+        
+        self.external_settings.update({
+            'detected_platform': platform,
+            'platform_detected_at': datetime.now().isoformat()
+        })
+        
+        return True
+    
+    def get_external_api_token(self) -> Optional[str]:
+        """Get external platform API token"""
+        return self.external_api_token if self.ai_assistant_type in ['chatforyou', 'protalk'] else None
+    
+    def get_external_bot_id(self) -> Optional[str]:
+        """Get external platform bot ID"""
+        return self.external_bot_id if self.ai_assistant_type in ['chatforyou', 'protalk'] else None
+    
+    def get_external_platform(self) -> Optional[str]:
+        """Get external platform name"""
+        return self.external_platform if self.ai_assistant_type in ['chatforyou', 'protalk'] else None
+    
+    def get_external_settings(self) -> dict:
+        """Get external platform settings"""
+        if self.ai_assistant_type in ['chatforyou', 'protalk'] and self.external_settings:
+            return self.external_settings
+        return {}
+    
+    def update_external_settings(self, settings: dict) -> bool:
+        """Update external platform settings"""
+        if self.ai_assistant_type not in ['chatforyou', 'protalk']:
+            return False
+        
+        if not self.external_settings:
+            self.external_settings = {}
+        
+        self.external_settings.update(settings)
+        return True
+    
+    def get_external_credentials(self) -> dict:
+        """Get external platform credentials"""
+        if self.ai_assistant_type in ['chatforyou', 'protalk']:
+            return {
+                'api_token': self.external_api_token,
+                'bot_id': self.external_bot_id,
+                'platform': self.external_platform
+            }
+        return {}
+    
+    # === ОБЩИЕ AI МЕТОДЫ ===
     
     def get_ai_daily_limit(self) -> Optional[int]:
         """Get AI daily message limit"""
-        if self.ai_assistant_settings:
-            return self.ai_assistant_settings.get('daily_limit')
+        if self.ai_assistant_type == 'openai' and self.openai_settings:
+            return self.openai_settings.get('daily_limit')
+        elif self.ai_assistant_type in ['chatforyou', 'protalk'] and self.external_settings:
+            return self.external_settings.get('daily_limit')
         return None
     
+    def set_ai_daily_limit(self, limit: Optional[int]) -> bool:
+        """Set AI daily message limit"""
+        if self.ai_assistant_type == 'openai':
+            if not self.openai_settings:
+                self.openai_settings = {}
+            self.openai_settings['daily_limit'] = limit
+            return True
+        elif self.ai_assistant_type in ['chatforyou', 'protalk']:
+            if not self.external_settings:
+                self.external_settings = {}
+            self.external_settings['daily_limit'] = limit
+            return True
+        return False
+    
+    def get_ai_stats(self) -> dict:
+        """Get AI usage statistics"""
+        stats = {
+            'type': self.ai_assistant_type,
+            'enabled': self.ai_assistant_enabled,
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'success_rate': 0.0,
+            'last_request_at': None
+        }
+        
+        if self.ai_assistant_type == 'openai' and self.openai_settings:
+            settings = self.openai_settings
+        elif self.ai_assistant_type in ['chatforyou', 'protalk'] and self.external_settings:
+            settings = self.external_settings
+        else:
+            return stats
+        
+        stats.update({
+            'total_requests': settings.get('total_requests', 0),
+            'successful_requests': settings.get('successful_requests', 0),
+            'failed_requests': settings.get('failed_requests', 0),
+            'last_request_at': settings.get('last_request_at')
+        })
+        
+        # Calculate success rate
+        total = stats['total_requests']
+        if total > 0:
+            stats['success_rate'] = (stats['successful_requests'] / total) * 100
+        
+        return stats
+    
+    def increment_ai_request_stats(self, success: bool = True) -> None:
+        """Increment AI request statistics"""
+        current_time = datetime.now().isoformat()
+        
+        if self.ai_assistant_type == 'openai':
+            if not self.openai_settings:
+                self.openai_settings = {}
+            settings = self.openai_settings
+        elif self.ai_assistant_type in ['chatforyou', 'protalk']:
+            if not self.external_settings:
+                self.external_settings = {}
+            settings = self.external_settings
+        else:
+            return
+        
+        settings['total_requests'] = settings.get('total_requests', 0) + 1
+        settings['last_request_at'] = current_time
+        
+        if success:
+            settings['successful_requests'] = settings.get('successful_requests', 0) + 1
+        else:
+            settings['failed_requests'] = settings.get('failed_requests', 0) + 1
+    
+    def clear_ai_configuration(self) -> bool:
+        """Clear AI assistant configuration"""
+        self.ai_assistant_enabled = False
+        self.ai_assistant_type = None
+        
+        # Clear OpenAI fields
+        self.openai_agent_id = None
+        self.openai_agent_name = None
+        self.openai_agent_instructions = None
+        self.openai_model = "gpt-4o"
+        self.openai_settings = None
+        
+        # Clear external platform fields
+        self.external_api_token = None
+        self.external_bot_id = None
+        self.external_platform = None
+        self.external_settings = None
+        
+        return True
+    
+    def get_ai_configuration_summary(self) -> dict:
+        """Get summary of AI configuration"""
+        summary = {
+            'enabled': self.ai_assistant_enabled,
+            'type': self.ai_assistant_type,
+            'configured': self.is_ai_enabled()
+        }
+        
+        if self.ai_assistant_type == 'openai':
+            summary.update({
+                'agent_id': self.openai_agent_id,
+                'agent_name': self.openai_agent_name,
+                'model': self.openai_model,
+                'has_instructions': bool(self.openai_agent_instructions)
+            })
+        elif self.ai_assistant_type in ['chatforyou', 'protalk']:
+            summary.update({
+                'platform': self.external_platform,
+                'has_token': bool(self.external_api_token),
+                'has_bot_id': bool(self.external_bot_id)
+            })
+        
+        return summary
+    
     def __repr__(self):
-        return f"<UserBot(id={self.id}, username={self.bot_username}, status={self.status})>"
+        return f"<UserBot(id={self.id}, username={self.bot_username}, status={self.status}, ai_type={self.ai_assistant_type})>"
 
 
 class Broadcast(Base):
@@ -612,7 +756,7 @@ class AIUsageLog(Base):
     date = Column(DateTime, default=func.current_date(), nullable=False)  # Дата (без времени)
     
     # ✅ NEW: Platform-specific tracking
-    platform_used = Column(String(50), nullable=True)    # 'chatforyou' или 'protalk'
+    platform_used = Column(String(50), nullable=True)    # 'openai', 'chatforyou' или 'protalk'
     successful_requests = Column(Integer, default=0, nullable=False)  # Успешные запросы
     failed_requests = Column(Integer, default=0, nullable=False)      # Неудачные запросы
     average_response_time = Column(Numeric(precision=10, scale=3), nullable=True)  # Среднее время ответа в секундах
@@ -678,6 +822,7 @@ class AIUsageLog(Base):
     def get_platform_display_name(self) -> str:
         """Get user-friendly platform name"""
         platform_names = {
+            'openai': 'OpenAI',
             'chatforyou': 'ChatForYou',
             'protalk': 'ProTalk'
         }
@@ -693,7 +838,7 @@ class AIPlatformStatus(Base):
     __tablename__ = "ai_platform_status"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    platform_name = Column(String(50), nullable=False, unique=True)  # 'chatforyou' или 'protalk'
+    platform_name = Column(String(50), nullable=False, unique=True)  # 'openai', 'chatforyou' или 'protalk'
     
     # Status tracking
     is_available = Column(Boolean, default=True, nullable=False)
