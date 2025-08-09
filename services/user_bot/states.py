@@ -45,3 +45,6 @@ class AISettingsStates(StatesGroup):
     waiting_for_assistant_id = State()   # Keep for compatibility
     waiting_for_daily_limit = State()
     in_ai_conversation = State()
+    # В AISettingsStates добавить:
+    waiting_for_openai_name = State()
+    waiting_for_openai_role = State()
