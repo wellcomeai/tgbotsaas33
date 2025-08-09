@@ -216,7 +216,7 @@ class AIKeyboards:
     
     @staticmethod
     def settings_menu(ai_enabled: bool, is_configured: bool, platform: str = None, daily_limit: int = None) -> InlineKeyboardMarkup:
-        """Меню настроек ИИ"""
+        """Меню настроек ИИ (универсальное, для совместимости)"""
         ai_status = "✅ Включен" if ai_enabled else "❌ Выключен"
         ai_id_status = "✅ Настроен" if is_configured else "❌ Не настроен"
         
@@ -264,6 +264,105 @@ class AIKeyboards:
                         callback_data="ai_test"
                     )
                 ])
+        
+        keyboard.append([
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data="admin_main"
+            )
+        ])
+        
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    @staticmethod
+    def chatforyou_settings_menu(ai_enabled: bool, is_configured: bool, platform: str = None) -> InlineKeyboardMarkup:
+        """Меню настроек ChatForYou агента"""
+        ai_status = "✅ Включен" if ai_enabled else "❌ Выключен"
+        config_status = "✅ Настроен" if is_configured else "❌ Не настроен"
+        
+        platform_info = ""
+        if platform:
+            platform_names = {
+                'chatforyou': 'ChatForYou',
+                'protalk': 'ProTalk'
+            }
+            platform_info = f" ({platform_names.get(platform, platform)})"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=f"🤖 ИИ Агент: {ai_status}",
+                    callback_data="ai_toggle"
+                )
+            ]
+        ]
+        
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"🔑 Конфигурация: {config_status}{platform_info}",
+                callback_data="ai_set_id"
+            )
+        ])
+        
+        # Test button only if fully configured
+        if is_configured:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🧪 Тестировать ИИ",
+                    callback_data="ai_test"
+                )
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data="admin_main"
+            )
+        ])
+        
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    @staticmethod
+    def openai_settings_menu(ai_enabled: bool, has_agent: bool) -> InlineKeyboardMarkup:
+        """Меню настроек OpenAI агента"""
+        ai_status = "✅ Включен" if ai_enabled else "❌ Выключен"
+        agent_status = "✅ Создан" if has_agent else "❌ Не создан"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=f"🤖 ИИ Агент: {ai_status}",
+                    callback_data="openai_toggle"
+                )
+            ]
+        ]
+        
+        if has_agent:
+            keyboard.extend([
+                [
+                    InlineKeyboardButton(
+                        text=f"🎯 Агент: {agent_status}",
+                        callback_data="openai_edit"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🧪 Тестировать",
+                        callback_data="openai_test"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑️ Удалить",
+                        callback_data="openai_delete"
+                    )
+                ]
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🎨 Создать агента",
+                    callback_data="openai_create"
+                )
+            ])
         
         keyboard.append([
             InlineKeyboardButton(
