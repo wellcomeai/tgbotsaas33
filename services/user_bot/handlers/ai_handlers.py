@@ -1,6 +1,6 @@
 """
-Обработчики ИИ ассистента с поддержкой OpenAI Assistants и детальным логированием
-ПОЛНАЯ РЕАЛИЗАЦИЯ со всей оригинальной логикой
+Обработчики ИИ ассистента с поддержкой OpenAI Assistants, улучшенным UX и детальным логированием
+ПОЛНАЯ РЕАЛИЗАЦИЯ со всей оригинальной логикой + улучшения
 """
 
 import structlog
@@ -394,6 +394,8 @@ class AIHandler:
                     agent_details += "\n⚠️ Режим: Тестовый (OpenAI недоступен)"
                 elif creation_method == 'real_openai_api':
                     agent_details += "\n✅ Режим: Реальный OpenAI"
+                elif creation_method == 'chat_api_fallback':
+                    agent_details += "\n🔄 Режим: Chat API (Fallback)"
                     
             except Exception as e:
                 logger.error("💥 Failed to get OpenAI agent info", 
@@ -868,7 +870,7 @@ class AIHandler:
         await message.answer(text, reply_markup=keyboard)
     
     async def handle_openai_role_input(self, message: Message, state: FSMContext):
-        """Обработка ввода роли OpenAI агента с логированием"""
+        """Обработка ввода роли OpenAI агента с улучшенным UX и логированием"""
         logger.info("📝 OpenAI agent role input", 
                    user_id=message.from_user.id,
                    input_length=len(message.text),
@@ -914,9 +916,9 @@ class AIHandler:
                 await state.clear()
                 return
             
-            await message.answer("🔄 Создаю агента в OpenAI...")
+            # ✨ УЛУЧШЕННЫЙ UX: Показываем прогресс пользователю
+            progress_message = await message.answer("🔄 Создаю агента в OpenAI...")
             
-            # Пытаемся создать агента через OpenAI сервис
             logger.info("🚀 Calling _create_agent_in_openai")
             success, response_data = await self._create_agent_in_openai(agent_name, agent_role)
             
@@ -936,10 +938,12 @@ class AIHandler:
                     success_message += f"\n✅ <b>Создан в OpenAI</b> за {duration}\n"
                 elif creation_method == 'fallback_stub':
                     success_message += f"\n⚠️ <b>Тестовый режим</b> (OpenAI недоступен)\n"
+                elif creation_method == 'chat_api_fallback':
+                    success_message += f"\n🔄 <b>Создан через Chat API</b> (Assistants API временно недоступен)\n"
                 
                 success_message += f"\nТеперь можете протестировать работу агента!"
                 
-                await message.answer(
+                await progress_message.edit_text(
                     success_message,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="🧪 Тестировать", callback_data="openai_test")],
@@ -948,11 +952,55 @@ class AIHandler:
                 )
             else:
                 error_msg = response_data.get('error', 'Неизвестная ошибка')
+                
+                # ✨ УЛУЧШЕННЫЙ UX: Анализируем тип ошибки и даем понятное объяснение
+                if "500" in error_msg or "server_error" in error_msg:
+                    user_friendly_error = """
+❌ <b>Временная проблема с OpenAI</b>
+
+Серверы OpenAI сейчас перегружены. Это частая ситуация.
+
+<b>Что делать:</b>
+• Попробуйте через 2-3 минуты
+• Или создайте агента позже
+• Проблема решится автоматически
+
+<b>Это НЕ ошибка вашего бота!</b>
+"""
+                elif "429" in error_msg or "rate" in error_msg:
+                    user_friendly_error = """
+❌ <b>Превышен лимит запросов</b>
+
+OpenAI ограничивает количество запросов в минуту.
+
+<b>Что делать:</b>
+• Подождите 1-2 минуты
+• Попробуйте создать агента снова
+• Это временное ограничение
+"""
+                elif "401" in error_msg or "unauthorized" in error_msg:
+                    user_friendly_error = """
+❌ <b>Проблема с API ключом</b>
+
+Возможно API ключ OpenAI неактивен.
+
+<b>Обратитесь к администратору</b>
+"""
+                else:
+                    user_friendly_error = f"""
+❌ <b>Ошибка при создании агента</b>
+
+{error_msg}
+
+<b>Попробуйте еще раз через несколько минут</b>
+"""
+                
                 logger.error("❌ Agent creation failed", error=error_msg)
                 
-                await message.answer(
-                    f"❌ Ошибка при создании агента: {error_msg}",
+                await progress_message.edit_text(
+                    user_friendly_error,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="openai_create")],
                         [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
                     ])
                 )
@@ -964,7 +1012,12 @@ class AIHandler:
                         error=str(e),
                         error_type=type(e).__name__,
                         exc_info=True)
-            await message.answer("❌ Произошла ошибка при создании агента")
+            await message.answer(
+                "❌ Произошла ошибка при создании агента. Попробуйте еще раз.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🤖 К настройкам ИИ", callback_data="admin_ai")]
+                ])
+            )
             await state.clear()
     
     async def _create_agent_in_openai(self, name: str, role: str) -> tuple[bool, dict]:
