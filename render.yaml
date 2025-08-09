@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: bot-factory
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: MASTER_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        value: postgresql://tgsaas2_user:7xsA29iPYsdk59M2KhHQDaX2X8oPmA7f@dpg-d27iqomuk2gs73e800og-a/tgsaas2
+      - key: DEBUG
+        value: false
+      - key: APP_NAME
+        value: Bot Factory
+      - key: APP_VERSION
+        value: 1.0.0
+      - key: PORT
+        value: 10000
+    autoDeploy: false
