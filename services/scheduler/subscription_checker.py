@@ -134,7 +134,7 @@ class SubscriptionChecker:
                 AND end_date <= NOW()
             """
             
-            expired_subscriptions = await db.database.fetch_all(query)
+            expired_subscriptions = await db.fetch_all(query)
             
             for subscription_row in expired_subscriptions:
                 subscription = dict(subscription_row)
@@ -185,7 +185,7 @@ class SubscriptionChecker:
                 WHERE id = $1
             """
             
-            row = await db.database.fetch_one(query, subscription_id)
+            row = await db.fetch_one(query, subscription_id)
             if not row:
                 return True
             
@@ -216,7 +216,7 @@ class SubscriptionChecker:
                 WHERE id = $1
             """
             
-            await db.database.execute(query, subscription_id, days_left)
+            await db.execute(query, subscription_id, days_left)
             
             logger.debug("Warning marked as sent",
                         subscription_id=subscription_id,
