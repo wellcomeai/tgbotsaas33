@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Boolean, Text, ForeignKey, UniqueConstraint, Numeric
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Boolean, Text, ForeignKey, UniqueConstraint, Numeric, Float, JSON, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -7,6 +7,171 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 Base = declarative_base()
+
+
+# ✅ НОВЫЕ МОДЕЛИ для подписок и платежей
+
+class Subscription(Base):
+    """Модель подписки пользователя"""
+    __tablename__ = 'subscriptions'
+    
+    # Основные поля
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Информация о плане
+    plan_id = Column(String(50), nullable=False, index=True)  # 1m, 3m, 6m, 12m
+    plan_name = Column(String(255), nullable=False)
+    
+    # Платежные данные
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default='RUB')
+    order_id = Column(String(255), unique=True, nullable=False, index=True)
+    payment_method = Column(String(50), nullable=False, default='robokassa_web')
+    
+    # Временные рамки
+    start_date = Column(DateTime, nullable=False, default=datetime.utcnow)
+    end_date = Column(DateTime, nullable=False, index=True)
+    
+    # Статус подписки
+    status = Column(String(50), default='active', index=True)
+    # Возможные статусы: active, expired, cancelled, refunded
+    
+    # Метаданные и временные метки
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    metadata = Column(JSON)  # Дополнительные данные в JSON
+    
+    # Связи
+    user = relationship("User", back_populates="subscriptions")
+    payments = relationship("Payment", back_populates="subscription")
+    
+    def __repr__(self):
+        return f"<Subscription(id={self.id}, user_id={self.user_id}, plan_id='{self.plan_id}', status='{self.status}')>"
+    
+    @property
+    def is_active(self) -> bool:
+        """Проверка активности подписки"""
+        return self.status == 'active' and self.end_date > datetime.utcnow()
+    
+    @property
+    def days_left(self) -> int:
+        """Количество дней до истечения"""
+        if self.end_date:
+            delta = self.end_date - datetime.utcnow()
+            return max(0, delta.days)
+        return 0
+
+
+class Payment(Base):
+    """Модель платежа (детальный лог всех транзакций)"""
+    __tablename__ = 'payments'
+    
+    # Основные поля
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    subscription_id = Column(Integer, ForeignKey('subscriptions.id', ondelete='SET NULL'), nullable=True)
+    
+    # Основные данные платежа
+    order_id = Column(String(255), unique=True, nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default='RUB')
+    status = Column(String(50), nullable=False, index=True)
+    # Возможные статусы: pending, success, failed, cancelled, refunded
+    
+    # Способ оплаты и провайдер
+    payment_method = Column(String(50), nullable=False)
+    provider = Column(String(100), default='robokassa')
+    
+    # Внешние идентификаторы
+    external_payment_id = Column(String(255), index=True)
+    external_transaction_id = Column(String(255), index=True)
+    
+    # Временные метки
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    processed_at = Column(DateTime, nullable=True)
+    
+    # Webhook данные от провайдера
+    webhook_data = Column(JSON)  # Сырые данные от Robokassa
+    
+    # Дополнительная информация
+    description = Column(Text)
+    user_email = Column(String(255))
+    user_ip = Column(String(45))  # Поддержка IPv6
+    
+    # Связи
+    user = relationship("User", back_populates="payments")
+    subscription = relationship("Subscription", back_populates="payments")
+    
+    def __repr__(self):
+        return f"<Payment(id={self.id}, order_id='{self.order_id}', amount={self.amount}, status='{self.status}')>"
+    
+    @property
+    def is_successful(self) -> bool:
+        """Проверка успешности платежа"""
+        return self.status == 'success'
+
+
+# ✅ МЕТОДЫ ДЛЯ РАБОТЫ С ПОДПИСКАМИ
+class SubscriptionMixin:
+    """Миксин с методами для работы с подписками"""
+    
+    @classmethod
+    async def get_active_subscription_by_user(cls, session, user_id: int):
+        """Получение активной подписки пользователя"""
+        from sqlalchemy import and_
+        
+        return session.query(Subscription).filter(
+            and_(
+                Subscription.user_id == user_id,
+                Subscription.status == 'active',
+                Subscription.end_date > datetime.utcnow()
+            )
+        ).first()
+    
+    @classmethod
+    async def get_expiring_subscriptions(cls, session, days_ahead: int = 7):
+        """Получение подписок, истекающих в ближайшие дни"""
+        from sqlalchemy import and_
+        from datetime import timedelta
+        
+        target_date = datetime.utcnow() + timedelta(days=days_ahead)
+        
+        return session.query(Subscription).filter(
+            and_(
+                Subscription.status == 'active',
+                Subscription.end_date <= target_date,
+                Subscription.end_date > datetime.utcnow()
+            )
+        ).all()
+    
+    @classmethod
+    async def get_subscription_stats(cls, session):
+        """Получение статистики по подпискам"""
+        from sqlalchemy import func, case
+        
+        stats = session.query(
+            func.count(Subscription.id).label('total'),
+            func.count(case([(and_(
+                Subscription.status == 'active',
+                Subscription.end_date > datetime.utcnow()
+            ), 1)])).label('active'),
+            func.count(case([(
+                Subscription.status == 'expired', 1
+            )])).label('expired'),
+            func.sum(case([(
+                Subscription.status == 'active', Subscription.amount
+            )])).label('active_revenue'),
+            func.sum(Subscription.amount).label('total_revenue')
+        ).first()
+        
+        return {
+            'total': stats.total or 0,
+            'active': stats.active or 0,
+            'expired': stats.expired or 0,
+            'active_revenue': float(stats.active_revenue or 0),
+            'total_revenue': float(stats.total_revenue or 0)
+        }
 
 
 class User(Base):
@@ -25,13 +190,50 @@ class User(Base):
     tokens_admin_chat_id = Column(BigInteger, nullable=True)
     tokens_initialized_at = Column(DateTime, nullable=True)
     
-    # ✅ Система оплаты
+    # ✅ Система оплаты (существующие поля)
     subscription_expires_at = Column(DateTime, nullable=True)
     subscription_active = Column(Boolean, default=False, nullable=False)
     last_payment_date = Column(DateTime, nullable=True)
     
-    # Relationships
+    # ✅ НОВЫЕ ПОЛЯ для подписок
+    max_bots = Column(Integer, default=5)
+    max_subscribers = Column(Integer, default=100)
+    subscription_end = Column(DateTime, nullable=True)
+    subscription_plan = Column(String(50), nullable=True)
+    
+    # ✅ НОВЫЕ СВЯЗИ для подписок и платежей
+    subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
+    payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
+    
+    # Relationships (существующие)
     bots = relationship("UserBot", back_populates="owner", cascade="all, delete-orphan")
+    
+    # ✅ НОВЫЕ МЕТОДЫ для подписок
+    @property
+    def has_active_subscription(self) -> bool:
+        """Проверка наличия активной подписки"""
+        return (
+            self.subscription_active and 
+            self.subscription_end and 
+            self.subscription_end > datetime.utcnow()
+        )
+    
+    @property
+    def is_pro_user(self) -> bool:
+        """Проверка Pro статуса пользователя"""
+        return self.has_active_subscription
+    
+    def get_bot_limit(self) -> int:
+        """Получение лимита ботов для пользователя"""
+        if self.is_pro_user:
+            return 999  # Безлимит для Pro
+        return self.max_bots or 5
+    
+    def get_subscriber_limit(self) -> int:
+        """Получение лимита подписчиков для пользователя"""
+        if self.is_pro_user:
+            return 999999  # Безлимит для Pro
+        return self.max_subscribers or 100
     
     def __repr__(self):
         return f"<User(id={self.id}, username={self.username}, plan={self.plan})>"
@@ -1454,3 +1656,25 @@ class AIPlatformStatus(Base):
     
     def __repr__(self):
         return f"<AIPlatformStatus(platform={self.platform_name}, available={self.is_available}, last_check={self.last_check_at})>"
+
+
+# Применяем миксин к моделям подписок
+Subscription.__bases__ = (SubscriptionMixin,) + Subscription.__bases__
+
+
+# ✅ НОВЫЕ ИНДЕКСЫ для быстрых запросов (для создания через Alembic)
+"""
+Составные индексы для оптимизации:
+
+# Subscription indexes
+Index('idx_subscriptions_user_status_end', 'user_id', 'status', 'end_date')
+Index('idx_payments_user_status_created', 'user_id', 'status', 'created_at')
+
+# Active subscriptions index with partial condition
+Index('idx_subscriptions_active_users', 'user_id', 'status', 'end_date', 
+      postgresql_where=and_(status == 'active', end_date > func.now()))
+
+# User subscription lookup
+Index('idx_users_subscription_active_end', 'subscription_active', 'subscription_end')
+Index('idx_users_plan_active', 'plan', 'subscription_active')
+"""
