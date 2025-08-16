@@ -255,35 +255,53 @@ class DatabaseManager:
 
     @staticmethod
     async def create_payment_record(payment_data: dict):
-        """✅ ИСПРАВЛЕННЫЙ: Create payment record"""
+        """✅ КРИТИЧЕСКИ ИСПРАВЛЕННЫЙ: Create payment record"""
         from database.models import Payment
         
         try:
+            logger.info("💳 Creating payment record", 
+                       user_id=payment_data.get('user_id'),
+                       order_id=payment_data.get('order_id'),
+                       amount=payment_data.get('amount'))
+            
             async with get_db_session() as session:
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем объект Payment, а не список
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем ОБЪЕКТ Payment, а не список
+                # Убеждаемся что payment_data содержит правильные поля
+                required_fields = ['user_id', 'order_id', 'amount', 'status']
+                for field in required_fields:
+                    if field not in payment_data:
+                        raise ValueError(f"Missing required field: {field}")
+                
+                # Создаем единичный объект Payment
                 payment = Payment(**payment_data)
                 session.add(payment)
                 await session.commit()
                 await session.refresh(payment)
                 
-                logger.info("✅ Payment record created", 
+                logger.info("✅ Payment record created successfully", 
                            payment_id=payment.id,
-                           user_id=payment_data.get('user_id'),
-                           order_id=payment_data.get('order_id'))
+                           user_id=payment.user_id,
+                           order_id=payment.order_id,
+                           amount=payment.amount,
+                           status=payment.status)
                 
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь с данными объекта
                 return {
                     'id': payment.id,
                     'user_id': payment.user_id,
                     'order_id': payment.order_id,
-                    'amount': payment.amount,
-                    'status': payment.status
+                    'amount': float(payment.amount) if payment.amount else 0.0,
+                    'status': payment.status,
+                    'created_at': payment.created_at.isoformat() if payment.created_at else None,
+                    'updated_at': payment.updated_at.isoformat() if payment.updated_at else None
                 }
                 
         except Exception as e:
             logger.error("❌ Failed to create payment record", 
                         error=str(e),
                         error_type=type(e).__name__,
-                        payment_data=payment_data)
+                        payment_data=payment_data,
+                        exc_info=True)
             raise
 
     # ===== SUBSCRIPTION METHODS =====
@@ -337,11 +355,13 @@ class DatabaseManager:
 
     @staticmethod
     async def get_active_subscription(user_id: int):
-        """✅ ИСПРАВЛЕННЫЙ: Get active subscription for user"""
+        """✅ КРИТИЧЕСКИ ИСПРАВЛЕННЫЙ: Get active subscription for user"""
         from database.models import Subscription
         from sqlalchemy import select, and_
         
         try:
+            logger.info("🔍 Getting active subscription", user_id=user_id)
+            
             async with get_db_session() as session:
                 result = await session.execute(
                     select(Subscription).where(
@@ -355,25 +375,38 @@ class DatabaseManager:
                 subscription = result.scalar_one_or_none()
                 
                 if subscription:
-                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь, а не объект
-                    return {
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем СЛОВАРЬ, а не объект
+                    subscription_dict = {
                         'id': subscription.id,
                         'user_id': subscription.user_id,
                         'plan_id': subscription.plan_id,
-                        'plan_name': subscription.plan_name,
+                        'plan_name': getattr(subscription, 'plan_name', None),
                         'order_id': subscription.order_id,
                         'status': subscription.status,
-                        'start_date': subscription.start_date,
-                        'end_date': subscription.end_date,
-                        'amount': subscription.amount
+                        'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
+                        'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
+                        'amount': float(subscription.amount) if subscription.amount else 0.0,
+                        'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
+                        'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
                     }
+                    
+                    logger.info("✅ Active subscription found", 
+                               user_id=user_id,
+                               subscription_id=subscription.id,
+                               plan_id=subscription.plan_id,
+                               end_date=subscription.end_date)
+                    
+                    return subscription_dict
+                
+                logger.info("❌ No active subscription found", user_id=user_id)
                 return None
                 
         except Exception as e:
             logger.error("❌ Failed to get active subscription", 
                         error=str(e),
                         error_type=type(e).__name__,
-                        user_id=user_id)
+                        user_id=user_id,
+                        exc_info=True)
             return None
 
     @staticmethod
@@ -402,7 +435,7 @@ class DatabaseManager:
                     'id': sub.id,
                     'user_id': sub.user_id,
                     'plan_id': sub.plan_id,
-                    'plan_name': sub.plan_name,
+                    'plan_name': getattr(sub, 'plan_name', None),
                     'end_date': sub.end_date,
                     'status': sub.status
                 }
@@ -888,6 +921,71 @@ class DatabaseManager:
                 .order_by(UserBot.created_at)
             )
             return result.scalars().all()
+
+    # ===== PAYMENT METHODS =====
+    
+    @staticmethod
+    async def get_payment_by_order_id(order_id: str):
+        """Get payment record by order ID"""
+        from database.models import Payment
+        from sqlalchemy import select
+        
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(Payment).where(Payment.order_id == order_id)
+                )
+                payment = result.scalar_one_or_none()
+                
+                if payment:
+                    return {
+                        'id': payment.id,
+                        'user_id': payment.user_id,
+                        'order_id': payment.order_id,
+                        'amount': float(payment.amount) if payment.amount else 0.0,
+                        'status': payment.status,
+                        'created_at': payment.created_at.isoformat() if payment.created_at else None,
+                        'updated_at': payment.updated_at.isoformat() if payment.updated_at else None
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error("❌ Failed to get payment by order_id", 
+                        error=str(e),
+                        order_id=order_id,
+                        exc_info=True)
+            return None
+    
+    @staticmethod
+    async def update_payment_status(payment_id: int, status: str):
+        """Update payment status"""
+        from database.models import Payment
+        from sqlalchemy import update
+        
+        try:
+            async with get_db_session() as session:
+                await session.execute(
+                    update(Payment)
+                    .where(Payment.id == payment_id)
+                    .values(
+                        status=status,
+                        updated_at=datetime.now()
+                    )
+                )
+                await session.commit()
+                
+                logger.info("✅ Payment status updated", 
+                           payment_id=payment_id,
+                           new_status=status)
+                return True
+                
+        except Exception as e:
+            logger.error("❌ Failed to update payment status", 
+                        error=str(e),
+                        payment_id=payment_id,
+                        status=status,
+                        exc_info=True)
+            return False
 
     # ===== SIMPLIFIED PLACEHOLDER METHODS =====
     # TODO: Implement remaining methods as needed
