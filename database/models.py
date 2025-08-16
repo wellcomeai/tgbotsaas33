@@ -64,35 +64,41 @@ class Subscription(Base):
 
 
 class Payment(Base):
-    """Модель платежа (детальный лог всех транзакций)"""
+    """✅ ОБНОВЛЕННАЯ МОДЕЛЬ: Payment table с поддержкой Robokassa"""
     __tablename__ = 'payments'
     
     # Основные поля
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     subscription_id = Column(Integer, ForeignKey('subscriptions.id', ondelete='SET NULL'), nullable=True)
     
     # Основные данные платежа
     order_id = Column(String(255), unique=True, nullable=False, index=True)
     amount = Column(Float, nullable=False)
-    currency = Column(String(10), default='RUB')
-    status = Column(String(50), nullable=False, index=True)
+    currency = Column(String(3), default='RUB')  # ✅ ИЗМЕНЕНО: с String(10) на String(3)
+    status = Column(String(50), default='pending', nullable=False, index=True)
     # Возможные статусы: pending, success, failed, cancelled, refunded
     
     # Способ оплаты и провайдер
-    payment_method = Column(String(50), nullable=False)
+    payment_method = Column(String(100), nullable=True)  # ✅ ИЗМЕНЕНО: убрали nullable=False
     provider = Column(String(100), default='robokassa')
     
     # Внешние идентификаторы
     external_payment_id = Column(String(255), index=True)
     external_transaction_id = Column(String(255), index=True)
     
+    # ✅ НОВЫЕ ПОЛЯ: Robokassa specific fields
+    robokassa_inv_id = Column(String(255), nullable=True, index=True)
+    robokassa_signature = Column(String(255), nullable=True)
+    raw_data = Column(Text, nullable=True)  # JSON string for backwards compatibility
+    
     # Временные метки
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)  # ✅ ИЗМЕНЕНО: datetime.now вместо datetime.utcnow
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)  # ✅ ДОБАВЛЕНО: updated_at поле
     processed_at = Column(DateTime, nullable=True)
     
     # Webhook данные от провайдера
-    webhook_data = Column(JSON)  # Сырые данные от Robokassa
+    webhook_data = Column(JSON)  # Сырые данные от Robokassa (новый формат)
     
     # Дополнительная информация
     description = Column(Text)
@@ -110,6 +116,55 @@ class Payment(Base):
     def is_successful(self) -> bool:
         """Проверка успешности платежа"""
         return self.status == 'success'
+    
+    # ✅ НОВЫЕ МЕТОДЫ для работы с Robokassa
+    def set_robokassa_data(self, inv_id: str = None, signature: str = None, raw_data: str = None) -> bool:
+        """Установить данные от Robokassa"""
+        try:
+            if inv_id:
+                self.robokassa_inv_id = inv_id
+            if signature:
+                self.robokassa_signature = signature
+            if raw_data:
+                self.raw_data = raw_data
+            return True
+        except Exception:
+            return False
+    
+    def get_robokassa_data(self) -> dict:
+        """Получить данные Robokassa"""
+        return {
+            'inv_id': self.robokassa_inv_id,
+            'signature': self.robokassa_signature,
+            'raw_data': self.raw_data
+        }
+    
+    def mark_as_success(self, external_id: str = None, transaction_id: str = None) -> bool:
+        """Пометить платеж как успешный"""
+        try:
+            self.status = 'success'
+            self.processed_at = datetime.now()
+            if external_id:
+                self.external_payment_id = external_id
+            if transaction_id:
+                self.external_transaction_id = transaction_id
+            return True
+        except Exception:
+            return False
+    
+    def mark_as_failed(self, error_description: str = None) -> bool:
+        """Пометить платеж как неудачный"""
+        try:
+            self.status = 'failed'
+            self.processed_at = datetime.now()
+            if error_description:
+                if self.description:
+                    self.description += f"\nError: {error_description}"
+                else:
+                    self.description = f"Payment failed: {error_description}"
+            return True
+        except Exception:
+            return False
 
 
 # ✅ МЕТОДЫ ДЛЯ РАБОТЫ С ПОДПИСКАМИ
@@ -1677,4 +1732,10 @@ Index('idx_subscriptions_active_users', 'user_id', 'status', 'end_date',
 # User subscription lookup
 Index('idx_users_subscription_active_end', 'subscription_active', 'subscription_end')
 Index('idx_users_plan_active', 'plan', 'subscription_active')
+
+# Payment indexes
+Index('idx_payments_order_id_status', 'order_id', 'status')
+Index('idx_payments_robokassa_inv_id', 'robokassa_inv_id')
+Index('idx_payments_created_status', 'created_at', 'status')
+Index('idx_payments_user_created', 'user_id', 'created_at')
 """
