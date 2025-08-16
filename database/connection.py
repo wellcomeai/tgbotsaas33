@@ -85,19 +85,32 @@ class DatabaseManager:
     
     @staticmethod
     async def fetch_all(query, *params):
-        """Execute query and fetch all results"""
+        """✅ ИСПРАВЛЕННЫЙ: Execute query and fetch all results as dictionaries"""
         from sqlalchemy import text
         async with get_db_session() as session:
             result = await session.execute(text(query), params if params else [])
-            return result.fetchall()
+            rows = result.fetchall()
+            
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем Row объекты в словари
+            if rows:
+                # Получаем названия колонок
+                columns = result.keys()
+                return [dict(zip(columns, row)) for row in rows]
+            return []
 
     @staticmethod
     async def fetch_one(query, *params):
-        """Execute query and fetch one result"""
+        """✅ ИСПРАВЛЕННЫЙ: Execute query and fetch one result as dictionary"""
         from sqlalchemy import text
         async with get_db_session() as session:
             result = await session.execute(text(query), params if params else [])
-            return result.fetchone()
+            row = result.fetchone()
+            
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем Row объект в словарь
+            if row:
+                columns = result.keys()
+                return dict(zip(columns, row))
+            return None
 
     @staticmethod
     async def execute(query, *params):
@@ -110,148 +123,321 @@ class DatabaseManager:
     # ===== USER METHODS =====
     
     @staticmethod
-    async def get_user(user_id: int) -> AsyncSession:
-        """Get user by ID"""
+    async def get_user(user_id: int) -> dict:
+        """✅ ИСПРАВЛЕННЫЙ: Get user by ID as dictionary"""
         from database.models import User
         
-        async with get_db_session() as session:
-            result = await session.get(User, user_id)
-            return result
+        try:
+            async with get_db_session() as session:
+                user = await session.get(User, user_id)
+                
+                if user:
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                    return {
+                        'id': user.id,
+                        'username': user.username,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
+                        'plan': user.plan,
+                        'subscription_active': user.subscription_active,
+                        'subscription_expires_at': user.subscription_expires_at.isoformat() if user.subscription_expires_at else None,
+                        'last_payment_date': user.last_payment_date.isoformat() if user.last_payment_date else None,
+                        'tokens_limit_total': user.tokens_limit_total,
+                        'tokens_used_total': user.tokens_used_total,
+                        'tokens_admin_chat_id': user.tokens_admin_chat_id,
+                        'tokens_initialized_at': user.tokens_initialized_at.isoformat() if user.tokens_initialized_at else None,
+                        'created_at': user.created_at.isoformat() if user.created_at else None,
+                        'updated_at': user.updated_at.isoformat() if user.updated_at else None
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error("❌ Failed to get user", error=str(e), user_id=user_id)
+            return None
     
     @staticmethod
-    async def create_or_update_user(user_data: dict) -> AsyncSession:
-        """Create or update user"""
+    async def create_or_update_user(user_data: dict) -> dict:
+        """✅ ИСПРАВЛЕННЫЙ: Create or update user returning dictionary"""
         from database.models import User
         from sqlalchemy import select
         
-        async with get_db_session() as session:
-            # Check if user exists
-            result = await session.execute(
-                select(User).where(User.id == user_data['id'])
-            )
-            user = result.scalar_one_or_none()
-            
-            if user:
-                # Update existing user
-                for key, value in user_data.items():
-                    if hasattr(user, key):
-                        setattr(user, key, value)
-            else:
-                # Create new user
-                user = User(**user_data)
-                session.add(user)
-            
-            await session.commit()
-            await session.refresh(user)
-            return user
+        try:
+            async with get_db_session() as session:
+                # Check if user exists
+                result = await session.execute(
+                    select(User).where(User.id == user_data['id'])
+                )
+                user = result.scalar_one_or_none()
+                
+                if user:
+                    # Update existing user
+                    for key, value in user_data.items():
+                        if hasattr(user, key):
+                            setattr(user, key, value)
+                else:
+                    # Create new user
+                    user = User(**user_data)
+                    session.add(user)
+                
+                await session.commit()
+                await session.refresh(user)
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                return {
+                    'id': user.id,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'plan': user.plan,
+                    'subscription_active': user.subscription_active,
+                    'subscription_expires_at': user.subscription_expires_at.isoformat() if user.subscription_expires_at else None,
+                    'last_payment_date': user.last_payment_date.isoformat() if user.last_payment_date else None,
+                    'tokens_limit_total': user.tokens_limit_total,
+                    'tokens_used_total': user.tokens_used_total,
+                    'tokens_admin_chat_id': user.tokens_admin_chat_id,
+                    'tokens_initialized_at': user.tokens_initialized_at.isoformat() if user.tokens_initialized_at else None,
+                    'created_at': user.created_at.isoformat() if user.created_at else None,
+                    'updated_at': user.updated_at.isoformat() if user.updated_at else None
+                }
+                
+        except Exception as e:
+            logger.error("❌ Failed to create/update user", error=str(e), user_data=user_data)
+            return None
     
     @staticmethod
-    async def create_or_update_user_with_tokens(user_data: dict, admin_chat_id: int = None) -> AsyncSession:
-        """✅ НОВЫЙ: Create or update user with token initialization"""
+    async def create_or_update_user_with_tokens(user_data: dict, admin_chat_id: int = None) -> dict:
+        """✅ ИСПРАВЛЕННЫЙ: Create or update user with token initialization returning dictionary"""
         from database.models import User
         from sqlalchemy import select
         
-        logger.info("🚀 Creating/updating user with token initialization", 
-                   user_id=user_data.get('id'),
-                   admin_chat_id=admin_chat_id)
-        
-        async with get_db_session() as session:
-            # Check if user exists
-            result = await session.execute(
-                select(User).where(User.id == user_data['id'])
-            )
-            user = result.scalar_one_or_none()
+        try:
+            logger.info("🚀 Creating/updating user with token initialization", 
+                       user_id=user_data.get('id'),
+                       admin_chat_id=admin_chat_id)
             
-            if user:
-                # Update existing user
-                for key, value in user_data.items():
-                    if hasattr(user, key):
-                        setattr(user, key, value)
+            async with get_db_session() as session:
+                # Check if user exists
+                result = await session.execute(
+                    select(User).where(User.id == user_data['id'])
+                )
+                user = result.scalar_one_or_none()
+                
+                if user:
+                    # Update existing user
+                    for key, value in user_data.items():
+                        if hasattr(user, key):
+                            setattr(user, key, value)
+                            
+                    # Initialize tokens if not already done
+                    if not user.tokens_limit_total:
+                        user.tokens_limit_total = 500000
+                        user.tokens_used_total = 0
+                        if admin_chat_id:
+                            user.tokens_admin_chat_id = admin_chat_id
+                        user.tokens_initialized_at = datetime.now()
                         
-                # Initialize tokens if not already done
-                if not user.tokens_limit_total:
-                    user.tokens_limit_total = 500000
-                    user.tokens_used_total = 0
-                    if admin_chat_id:
-                        user.tokens_admin_chat_id = admin_chat_id
-                    user.tokens_initialized_at = datetime.now()
+                    logger.info("✅ User updated with token check", 
+                               user_id=user.id,
+                               tokens_limit=user.tokens_limit_total)
+                else:
+                    # Create new user with tokens
+                    user_data.update({
+                        'tokens_limit_total': 500000,
+                        'tokens_used_total': 0,
+                        'tokens_admin_chat_id': admin_chat_id,
+                        'tokens_initialized_at': datetime.now()
+                    })
                     
-                logger.info("✅ User updated with token check", 
-                           user_id=user.id,
-                           tokens_limit=user.tokens_limit_total)
-            else:
-                # Create new user with tokens
-                user_data.update({
-                    'tokens_limit_total': 500000,
-                    'tokens_used_total': 0,
-                    'tokens_admin_chat_id': admin_chat_id,
-                    'tokens_initialized_at': datetime.now()
-                })
+                    user = User(**user_data)
+                    session.add(user)
+                    
+                    logger.info("✅ New user created with tokens", 
+                               user_id=user_data['id'],
+                               tokens_limit=500000)
                 
-                user = User(**user_data)
-                session.add(user)
+                await session.commit()
+                await session.refresh(user)
                 
-                logger.info("✅ New user created with tokens", 
-                           user_id=user_data['id'],
-                           tokens_limit=500000)
-            
-            await session.commit()
-            await session.refresh(user)
-            return user
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                return {
+                    'id': user.id,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'plan': user.plan,
+                    'subscription_active': user.subscription_active,
+                    'subscription_expires_at': user.subscription_expires_at.isoformat() if user.subscription_expires_at else None,
+                    'last_payment_date': user.last_payment_date.isoformat() if user.last_payment_date else None,
+                    'tokens_limit_total': user.tokens_limit_total,
+                    'tokens_used_total': user.tokens_used_total,
+                    'tokens_admin_chat_id': user.tokens_admin_chat_id,
+                    'tokens_initialized_at': user.tokens_initialized_at.isoformat() if user.tokens_initialized_at else None,
+                    'created_at': user.created_at.isoformat() if user.created_at else None,
+                    'updated_at': user.updated_at.isoformat() if user.updated_at else None
+                }
+                
+        except Exception as e:
+            logger.error("❌ Failed to create/update user with tokens", error=str(e), user_data=user_data)
+            return None
 
     # ===== BOT METHODS =====
     
     @staticmethod
-    async def get_user_bots(user_id: int):
-        """Get all bots for a user"""
+    async def get_user_bots(user_id: int) -> List[dict]:
+        """✅ ИСПРАВЛЕННЫЙ: Get all bots for a user as list of dictionaries"""
         from database.models import UserBot
         from sqlalchemy import select
         
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(UserBot)
-                .where(UserBot.user_id == user_id)
-                .order_by(UserBot.created_at.desc())
-            )
-            return result.scalars().all()
-    
-    @staticmethod
-    async def create_user_bot(bot_data: dict):
-        """Create a new user bot"""
-        from database.models import UserBot
-        
-        async with get_db_session() as session:
-            bot = UserBot(**bot_data)
-            session.add(bot)
-            await session.commit()
-            await session.refresh(bot)
-            return bot
-    
-    @staticmethod
-    async def get_bot_by_id(bot_id: str, fresh: bool = False):
-        """✅ ОБНОВЛЕНО: Get bot by ID with optional fresh data"""
-        from database.models import UserBot
-        from sqlalchemy import select
-        
-        async with get_db_session() as session:
-            if fresh:
-                # Получаем всегда свежие данные из БД
+        try:
+            async with get_db_session() as session:
                 result = await session.execute(
                     select(UserBot)
-                    .where(UserBot.bot_id == bot_id)
-                    .execution_options(populate_existing=True)
+                    .where(UserBot.user_id == user_id)
+                    .order_by(UserBot.created_at.desc())
                 )
-                bot = result.scalar_one_or_none()
+                bots = result.scalars().all()
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Конвертируем в список словарей
+                return [
+                    {
+                        'id': bot.id,
+                        'bot_id': bot.bot_id,
+                        'user_id': bot.user_id,
+                        'bot_name': bot.bot_name,
+                        'bot_username': bot.bot_username,
+                        'bot_token': bot.bot_token,
+                        'status': bot.status,
+                        'is_running': bot.is_running,
+                        'ai_assistant_enabled': bot.ai_assistant_enabled,
+                        'ai_assistant_type': bot.ai_assistant_type,
+                        'openai_agent_id': bot.openai_agent_id,
+                        'openai_agent_name': bot.openai_agent_name,
+                        'openai_agent_instructions': bot.openai_agent_instructions,
+                        'openai_model': bot.openai_model,
+                        'openai_settings': bot.openai_settings,
+                        'openai_admin_chat_id': bot.openai_admin_chat_id,
+                        'tokens_used_input': bot.tokens_used_input,
+                        'tokens_used_output': bot.tokens_used_output,
+                        'tokens_used_total': bot.tokens_used_total,
+                        'external_api_token': bot.external_api_token,
+                        'external_bot_id': bot.external_bot_id,
+                        'external_platform': bot.external_platform,
+                        'external_settings': bot.external_settings,
+                        'created_at': bot.created_at.isoformat() if bot.created_at else None,
+                        'updated_at': bot.updated_at.isoformat() if bot.updated_at else None
+                    }
+                    for bot in bots
+                ]
+                
+        except Exception as e:
+            logger.error("❌ Failed to get user bots", error=str(e), user_id=user_id)
+            return []
+    
+    @staticmethod
+    async def create_user_bot(bot_data: dict) -> dict:
+        """✅ ИСПРАВЛЕННЫЙ: Create a new user bot returning dictionary"""
+        from database.models import UserBot
+        
+        try:
+            async with get_db_session() as session:
+                bot = UserBot(**bot_data)
+                session.add(bot)
+                await session.commit()
+                await session.refresh(bot)
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                return {
+                    'id': bot.id,
+                    'bot_id': bot.bot_id,
+                    'user_id': bot.user_id,
+                    'bot_name': bot.bot_name,
+                    'bot_username': bot.bot_username,
+                    'bot_token': bot.bot_token,
+                    'status': bot.status,
+                    'is_running': bot.is_running,
+                    'ai_assistant_enabled': bot.ai_assistant_enabled,
+                    'ai_assistant_type': bot.ai_assistant_type,
+                    'openai_agent_id': bot.openai_agent_id,
+                    'openai_agent_name': bot.openai_agent_name,
+                    'openai_agent_instructions': bot.openai_agent_instructions,
+                    'openai_model': bot.openai_model,
+                    'openai_settings': bot.openai_settings,
+                    'openai_admin_chat_id': bot.openai_admin_chat_id,
+                    'tokens_used_input': bot.tokens_used_input,
+                    'tokens_used_output': bot.tokens_used_output,
+                    'tokens_used_total': bot.tokens_used_total,
+                    'external_api_token': bot.external_api_token,
+                    'external_bot_id': bot.external_bot_id,
+                    'external_platform': bot.external_platform,
+                    'external_settings': bot.external_settings,
+                    'created_at': bot.created_at.isoformat() if bot.created_at else None,
+                    'updated_at': bot.updated_at.isoformat() if bot.updated_at else None
+                }
+                
+        except Exception as e:
+            logger.error("❌ Failed to create user bot", error=str(e), bot_data=bot_data)
+            return None
+    
+    @staticmethod
+    async def get_bot_by_id(bot_id: str, fresh: bool = False) -> dict:
+        """✅ ИСПРАВЛЕННЫЙ: Get bot by ID with optional fresh data returning dictionary"""
+        from database.models import UserBot
+        from sqlalchemy import select
+        
+        try:
+            async with get_db_session() as session:
+                if fresh:
+                    # Получаем всегда свежие данные из БД
+                    result = await session.execute(
+                        select(UserBot)
+                        .where(UserBot.bot_id == bot_id)
+                        .execution_options(populate_existing=True)
+                    )
+                    bot = result.scalar_one_or_none()
+                    if bot:
+                        await session.refresh(bot)
+                    logger.info("🔄 Retrieved fresh bot data", bot_id=bot_id)
+                else:
+                    # Обычное получение (может быть из кэша)
+                    result = await session.execute(
+                        select(UserBot).where(UserBot.bot_id == bot_id)
+                    )
+                    bot = result.scalar_one_or_none()
+                
                 if bot:
-                    await session.refresh(bot)
-                logger.info("🔄 Retrieved fresh bot data", bot_id=bot_id)
-                return bot
-            else:
-                # Обычное получение (может быть из кэша)
-                result = await session.execute(
-                    select(UserBot).where(UserBot.bot_id == bot_id)
-                )
-                return result.scalar_one_or_none()
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                    return {
+                        'id': bot.id,
+                        'bot_id': bot.bot_id,
+                        'user_id': bot.user_id,
+                        'bot_name': bot.bot_name,
+                        'bot_username': bot.bot_username,
+                        'bot_token': bot.bot_token,
+                        'status': bot.status,
+                        'is_running': bot.is_running,
+                        'ai_assistant_enabled': bot.ai_assistant_enabled,
+                        'ai_assistant_type': bot.ai_assistant_type,
+                        'openai_agent_id': bot.openai_agent_id,
+                        'openai_agent_name': bot.openai_agent_name,
+                        'openai_agent_instructions': bot.openai_agent_instructions,
+                        'openai_model': bot.openai_model,
+                        'openai_settings': bot.openai_settings,
+                        'openai_admin_chat_id': bot.openai_admin_chat_id,
+                        'tokens_used_input': bot.tokens_used_input,
+                        'tokens_used_output': bot.tokens_used_output,
+                        'tokens_used_total': bot.tokens_used_total,
+                        'external_api_token': bot.external_api_token,
+                        'external_bot_id': bot.external_bot_id,
+                        'external_platform': bot.external_platform,
+                        'external_settings': bot.external_settings,
+                        'created_at': bot.created_at.isoformat() if bot.created_at else None,
+                        'updated_at': bot.updated_at.isoformat() if bot.updated_at else None
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error("❌ Failed to get bot by id", error=str(e), bot_id=bot_id)
+            return None
 
     @staticmethod
     async def delete_user_bot(bot_id: str):
@@ -365,7 +551,7 @@ class DatabaseManager:
                            amount=payment.amount,
                            status=payment.status)
                 
-                # Возвращаем словарь с данными объекта
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь с данными объекта
                 return {
                     'id': payment.id,
                     'user_id': payment.user_id,
@@ -388,27 +574,37 @@ class DatabaseManager:
 
     @staticmethod
     async def get_subscription_by_order_id(order_id: str):
-        """Get subscription by order ID"""
+        """✅ ИСПРАВЛЕННЫЙ: Get subscription by order ID as dictionary"""
         from database.models import Subscription
         from sqlalchemy import select
         
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(Subscription).where(Subscription.order_id == order_id)
-            )
-            subscription = result.scalar_one_or_none()
-            
-            if subscription:
-                return {
-                    'id': subscription.id,
-                    'user_id': subscription.user_id,
-                    'plan_id': subscription.plan_id,
-                    'order_id': subscription.order_id,
-                    'status': subscription.status,
-                    'start_date': subscription.start_date,
-                    'end_date': subscription.end_date,
-                    'amount': subscription.amount
-                }
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(Subscription).where(Subscription.order_id == order_id)
+                )
+                subscription = result.scalar_one_or_none()
+                
+                if subscription:
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
+                    return {
+                        'id': subscription.id,
+                        'user_id': subscription.user_id,
+                        'plan_id': subscription.plan_id,
+                        'plan_name': getattr(subscription, 'plan_name', None),
+                        'order_id': subscription.order_id,
+                        'status': subscription.status,
+                        'amount': float(subscription.amount) if subscription.amount else 0.0,
+                        'currency': getattr(subscription, 'currency', 'RUB'),
+                        'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
+                        'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
+                        'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
+                        'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error("❌ Failed to get subscription by order_id", error=str(e), order_id=order_id)
             return None
 
     @staticmethod
@@ -501,6 +697,7 @@ class DatabaseManager:
                            order_id=subscription.order_id,
                            amount=subscription.amount)
                 
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
                 return {
                     'id': subscription.id,
                     'user_id': subscription.user_id,
@@ -509,8 +706,11 @@ class DatabaseManager:
                     'order_id': subscription.order_id,
                     'status': subscription.status,
                     'amount': float(subscription.amount) if subscription.amount else 0.0,
+                    'currency': getattr(subscription, 'currency', 'RUB'),
                     'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
-                    'end_date': subscription.end_date.isoformat() if subscription.end_date else None
+                    'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
+                    'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
+                    'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
                 }
                 
         except Exception as e:
@@ -673,40 +873,47 @@ class DatabaseManager:
 
     @staticmethod
     async def get_users_with_expiring_subscriptions(days_ahead: int):
-        """Get subscriptions expiring in N days"""
+        """✅ ИСПРАВЛЕННЫЙ: Get subscriptions expiring in N days as list of dictionaries"""
         from database.models import Subscription
         from sqlalchemy import select, and_
         
-        target_date = datetime.now() + timedelta(days=days_ahead)
-        next_day = target_date + timedelta(days=1)
-        
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(Subscription).where(
-                    and_(
-                        Subscription.status == 'active',
-                        Subscription.end_date >= target_date,
-                        Subscription.end_date < next_day
+        try:
+            target_date = datetime.now() + timedelta(days=days_ahead)
+            next_day = target_date + timedelta(days=1)
+            
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(Subscription).where(
+                        and_(
+                            Subscription.status == 'active',
+                            Subscription.end_date >= target_date,
+                            Subscription.end_date < next_day
+                        )
                     )
                 )
-            )
-            subscriptions = result.scalars().all()
-            
-            return [
-                {
-                    'id': sub.id,
-                    'user_id': sub.user_id,
-                    'plan_id': sub.plan_id,
-                    'plan_name': getattr(sub, 'plan_name', None),
-                    'end_date': sub.end_date,
-                    'status': sub.status
-                }
-                for sub in subscriptions
-            ]
+                subscriptions = result.scalars().all()
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем список словарей
+                return [
+                    {
+                        'id': sub.id,
+                        'user_id': sub.user_id,
+                        'plan_id': sub.plan_id,
+                        'plan_name': getattr(sub, 'plan_name', None),
+                        'end_date': sub.end_date.isoformat() if sub.end_date else None,
+                        'status': sub.status,
+                        'amount': float(sub.amount) if sub.amount else 0.0
+                    }
+                    for sub in subscriptions
+                ]
+                
+        except Exception as e:
+            logger.error("❌ Failed to get expiring subscriptions", error=str(e), days_ahead=days_ahead)
+            return []
 
     @staticmethod
     async def get_subscription_stats():
-        """Get subscription statistics"""
+        """✅ ИСПРАВЛЕННЫЙ: Get subscription statistics as dictionary"""
         try:
             query = """
                 SELECT 
@@ -724,21 +931,14 @@ class DatabaseManager:
                 row = result.fetchone()
                 
                 if row:
-                    # Правильное извлечение данных из Row объекта
-                    total = int(row.total or 0)
-                    active = int(row.active or 0)
-                    expired = int(row.expired or 0)
-                    cancelled = int(row.cancelled or 0)
-                    active_revenue = float(row.active_revenue or 0)
-                    total_revenue = float(row.total_revenue or 0)
-                    
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильное извлечение данных из Row объекта
                     return {
-                        'total': total,
-                        'active': active,
-                        'expired': expired,
-                        'cancelled': cancelled,
-                        'active_revenue': active_revenue,
-                        'revenue': total_revenue
+                        'total': int(row.total or 0),
+                        'active': int(row.active or 0),
+                        'expired': int(row.expired or 0),
+                        'cancelled': int(row.cancelled or 0),
+                        'active_revenue': float(row.active_revenue or 0),
+                        'revenue': float(row.total_revenue or 0)
                     }
                 else:
                     return {
@@ -879,19 +1079,36 @@ class DatabaseManager:
     
     @staticmethod
     async def get_expired_subscriptions():
-        """Get users with expired subscriptions"""
+        """✅ ИСПРАВЛЕННЫЙ: Get users with expired subscriptions as list of dictionaries"""
         from database.models import User
         from sqlalchemy import select
         
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(User)
-                .where(
-                    User.subscription_active == True,
-                    User.subscription_expires_at < datetime.now()
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(User)
+                    .where(
+                        User.subscription_active == True,
+                        User.subscription_expires_at < datetime.now()
+                    )
                 )
-            )
-            return result.scalars().all()
+                users = result.scalars().all()
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем список словарей
+                return [
+                    {
+                        'id': user.id,
+                        'username': user.username,
+                        'plan': user.plan,
+                        'subscription_expires_at': user.subscription_expires_at.isoformat() if user.subscription_expires_at else None,
+                        'subscription_active': user.subscription_active
+                    }
+                    for user in users
+                ]
+                
+        except Exception as e:
+            logger.error("❌ Failed to get expired subscriptions", error=str(e))
+            return []
     
     # ===== CACHE MANAGEMENT METHODS =====
     
@@ -1089,7 +1306,7 @@ class DatabaseManager:
 
     @staticmethod
     async def get_user_token_balance(user_id: int):
-        """Get user token balance"""
+        """✅ ИСПРАВЛЕННЫЙ: Get user token balance as dictionary"""
         from database.models import User
         from sqlalchemy import select
         
@@ -1104,6 +1321,7 @@ class DatabaseManager:
                 if not data:
                     return None
                 
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
                 return {
                     'total_used': int(data.tokens_used_total or 0),
                     'limit': int(data.tokens_limit_total or 500000)
@@ -1200,23 +1418,45 @@ class DatabaseManager:
     
     @staticmethod
     async def get_all_active_bots():
-        """Get all active bots"""
+        """✅ ИСПРАВЛЕННЫЙ: Get all active bots as list of dictionaries"""
         from database.models import UserBot
         from sqlalchemy import select
         
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(UserBot)
-                .where(UserBot.status == "active")
-                .order_by(UserBot.created_at)
-            )
-            return result.scalars().all()
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(UserBot)
+                    .where(UserBot.status == "active")
+                    .order_by(UserBot.created_at)
+                )
+                bots = result.scalars().all()
+                
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем список словарей
+                return [
+                    {
+                        'id': bot.id,
+                        'bot_id': bot.bot_id,
+                        'user_id': bot.user_id,
+                        'bot_name': bot.bot_name,
+                        'bot_username': bot.bot_username,
+                        'status': bot.status,
+                        'is_running': bot.is_running,
+                        'ai_assistant_enabled': bot.ai_assistant_enabled,
+                        'ai_assistant_type': bot.ai_assistant_type,
+                        'created_at': bot.created_at.isoformat() if bot.created_at else None
+                    }
+                    for bot in bots
+                ]
+                
+        except Exception as e:
+            logger.error("❌ Failed to get active bots", error=str(e))
+            return []
 
     # ===== PAYMENT METHODS =====
     
     @staticmethod
     async def get_payment_by_order_id(order_id: str):
-        """Get payment record by order ID"""
+        """✅ ИСПРАВЛЕННЫЙ: Get payment record by order ID as dictionary"""
         from database.models import Payment
         from sqlalchemy import select
         
@@ -1228,12 +1468,16 @@ class DatabaseManager:
                 payment = result.scalar_one_or_none()
                 
                 if payment:
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
                     return {
                         'id': payment.id,
                         'user_id': payment.user_id,
                         'order_id': payment.order_id,
                         'amount': float(payment.amount) if payment.amount else 0.0,
                         'status': payment.status,
+                        'currency': getattr(payment, 'currency', 'RUB'),
+                        'payment_method': getattr(payment, 'payment_method', None),
+                        'provider': getattr(payment, 'provider', None),
                         'created_at': payment.created_at.isoformat() if payment.created_at else None,
                         'updated_at': payment.updated_at.isoformat() if payment.updated_at else None
                     }
