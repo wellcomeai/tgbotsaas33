@@ -26,6 +26,28 @@ from services.payments.subscription_manager import subscription_manager
 logger = structlog.get_logger()
 
 
+def row_to_dict(row):
+    """✅ НОВОЕ: Convert database Row object to dict safely"""
+    if row is None:
+        return None
+    
+    if hasattr(row, '_asdict'):  # namedtuple
+        return row._asdict()
+    elif hasattr(row, '_mapping'):  # SQLAlchemy Row
+        return dict(row._mapping)
+    elif hasattr(row, 'keys'):  # Row with keys() method
+        return {key: row[key] for key in row.keys()}
+    elif isinstance(row, dict):  # Already a dict
+        return row
+    else:
+        # Fallback - try to convert to dict
+        try:
+            return dict(row)
+        except:
+            logger.error("Failed to convert row to dict", row_type=type(row).__name__)
+            return None
+
+
 class BotCreationStates(StatesGroup):
     waiting_for_token = State()
 
@@ -253,6 +275,7 @@ class MasterBot:
         # ✅ НОВОЕ: Проверяем и показываем статус подписки
         try:
             limits = await self.subscription_manager.check_user_limits(message.from_user.id)
+            limits = row_to_dict(limits) if limits else {}
             
             if limits.get('is_pro'):
                 # Пользователь имеет Pro подписку
@@ -422,9 +445,10 @@ class MasterBot:
         await callback.answer()
         
         # Проверяем текущую подписку пользователя
-        current_subscription = await self.subscription_manager.get_active_subscription(
+        current_subscription_raw = await self.subscription_manager.get_active_subscription(
             callback.from_user.id
         )
+        current_subscription = row_to_dict(current_subscription_raw) if current_subscription_raw else None
         
         if current_subscription:
             # У пользователя уже есть активная подписка
@@ -493,7 +517,7 @@ class MasterBot:
         )
     
     async def cb_pricing_plan(self, callback: CallbackQuery):
-        """✅ ОБНОВЛЕННЫЙ с максимальным отладочным логированием"""
+        """✅ ИСПРАВЛЕНО: Правильная обработка результатов БД"""
         await callback.answer()
         
         logger.info("🔥 ===== ROBOKASSA DEBUG START =====")
@@ -646,7 +670,7 @@ class MasterBot:
             
             logger.info("✅ All required parameters present")
             
-            # ✅ СОЗДАЕМ ЗАПИСЬ О ПЛАТЕЖЕ
+            # ✅ ИСПРАВЛЕНО: СОЗДАЕМ ЗАПИСЬ О ПЛАТЕЖЕ с безопасной обработкой результата
             logger.info("💾 Creating payment record...")
             payment_record_data = {
                 'user_id': callback.from_user.id,
@@ -661,7 +685,8 @@ class MasterBot:
             logger.info("📝 Payment record data", payment_data=payment_record_data)
             
             try:
-                payment_record = await db.create_payment_record(payment_record_data)
+                payment_record_raw = await db.create_payment_record(payment_record_data)
+                payment_record = row_to_dict(payment_record_raw) if payment_record_raw else None
                 
                 if payment_record:
                     logger.info("✅ Payment record created", 
@@ -848,7 +873,7 @@ class MasterBot:
         return True
     
     async def cb_check_payment(self, callback: CallbackQuery):
-        """✅ НОВЫЙ: Проверка статуса оплаты"""
+        """✅ ИСПРАВЛЕНО: Проверка статуса оплаты с безопасной обработкой БД"""
         await callback.answer()
         
         # Извлекаем order_id из callback_data
@@ -859,7 +884,8 @@ class MasterBot:
         
         try:
             # Проверяем подписку в БД
-            subscription = await db.get_subscription_by_order_id(order_id)
+            subscription_raw = await db.get_subscription_by_order_id(order_id)
+            subscription = row_to_dict(subscription_raw) if subscription_raw else None
             
             if subscription and subscription.get('status') == 'active':
                 # Оплата прошла успешно
@@ -1030,63 +1056,70 @@ class MasterBot:
     # ✅ BOT MANAGEMENT
     
     async def cb_bot_details(self, callback: CallbackQuery):
-        """Bot details callback"""
+        """✅ ИСПРАВЛЕНО: Bot details callback с безопасной обработкой БД"""
         await callback.answer()
         
         bot_id = callback.data.replace("bot_", "")
-        bot = await db.get_bot_by_id(bot_id)
+        bot_raw = await db.get_bot_by_id(bot_id)
+        bot = row_to_dict(bot_raw) if bot_raw else None
         
         if not bot:
             await callback.answer("Бот не найден", show_alert=True)
             return
         
         # ✅ ДОБАВЛЕНО: Проверка владельца бота
-        if bot.user_id != callback.from_user.id:
+        if bot.get('user_id') != callback.from_user.id:
             await callback.answer("❌ Это не ваш бот", show_alert=True)
             return
         
-        status_emoji = Emoji.SUCCESS if bot.is_running else Emoji.ERROR
-        status_text = "Активен" if bot.is_running else "Остановлен"
+        status_emoji = Emoji.SUCCESS if bot.get('is_running') else Emoji.ERROR
+        status_text = "Активен" if bot.get('is_running') else "Остановлен"
         
         # ✅ НОВОЕ: Показываем информацию об ИИ агенте
         ai_info = ""
-        if bot.ai_assistant_enabled and bot.ai_assistant_type:
-            if bot.ai_assistant_type == 'openai':
-                agent_name = getattr(bot, 'openai_agent_name', 'OpenAI Агент')
+        if bot.get('ai_assistant_enabled') and bot.get('ai_assistant_type'):
+            if bot.get('ai_assistant_type') == 'openai':
+                agent_name = bot.get('openai_agent_name', 'OpenAI Агент')
                 ai_info = f"🎨 <b>ИИ Агент:</b> {agent_name} (OpenAI)\n"
-            elif bot.ai_assistant_type in ['chatforyou', 'protalk']:
-                platform_name = bot.ai_assistant_type.title()
+            elif bot.get('ai_assistant_type') in ['chatforyou', 'protalk']:
+                platform_name = bot.get('ai_assistant_type').title()
                 ai_info = f"🌐 <b>ИИ Агент:</b> {platform_name}\n"
         else:
             ai_info = f"🤖 <b>ИИ Агент:</b> Не настроен\n"
         
         # Get extended bot info
+        created_at = bot.get('created_at', datetime.now())
+        created_at_str = created_at.strftime('%d.%m.%Y') if hasattr(created_at, 'strftime') else str(created_at)
+        
         text = f"""
-{Emoji.ROBOT} <b>Бот @{bot.bot_username}</b>
+{Emoji.ROBOT} <b>Бот @{bot.get('bot_username', 'unknown')}</b>
 
 {status_emoji} <b>Статус:</b> {status_text}
-{Emoji.USERS} <b>Подписчиков:</b> {bot.total_subscribers}
-{Emoji.BROADCAST} <b>Отправлено сообщений:</b> {bot.total_messages_sent}
-{ai_info}{Emoji.CHART} <b>Создан:</b> {bot.created_at.strftime('%d.%m.%Y')}
+{Emoji.USERS} <b>Подписчиков:</b> {bot.get('total_subscribers', 0)}
+{Emoji.BROADCAST} <b>Отправлено сообщений:</b> {bot.get('total_messages_sent', 0)}
+{ai_info}{Emoji.CHART} <b>Создан:</b> {created_at_str}
 
 {Emoji.INFO} <b>Настройки:</b>
-- Приветствие: {'✅' if bot.welcome_message else '❌ Не настроено'}
-- Кнопка приветствия: {'✅' if bot.welcome_button_text else '❌ Не настроено'}
-- Подтверждение: {'✅' if bot.confirmation_message else '❌ Не настроено'}
-- Прощание: {'✅' if bot.goodbye_message else '❌ Не настроено'}
-- Кнопка прощания: {'✅' if bot.goodbye_button_text else '❌ Не настроено'}
+- Приветствие: {'✅' if bot.get('welcome_message') else '❌ Не настроено'}
+- Кнопка приветствия: {'✅' if bot.get('welcome_button_text') else '❌ Не настроено'}
+- Подтверждение: {'✅' if bot.get('confirmation_message') else '❌ Не настроено'}
+- Прощание: {'✅' if bot.get('goodbye_message') else '❌ Не настроено'}
+- Кнопка прощания: {'✅' if bot.get('goodbye_button_text') else '❌ Не настроено'}
 
 {Emoji.NEW} <b>Для настройки бота:</b>
-Напишите боту @{bot.bot_username} команду /start
+Напишите боту @{bot.get('bot_username', 'unknown')} команду /start
 """
+        
+        # Создаем объект-подобие для обратной совместимости
+        bot_obj = type('Bot', (), bot)()
         
         await callback.message.edit_text(
             text,
-            reply_markup=self.get_bot_info_keyboard(bot)
+            reply_markup=self.get_bot_info_keyboard(bot_obj)
         )
     
     async def cb_bot_manage(self, callback: CallbackQuery):
-        """Bot management actions"""
+        """✅ ИСПРАВЛЕНО: Bot management actions с безопасной обработкой БД"""
         await callback.answer()
         
         action_data = callback.data.replace("manage_", "")
@@ -1098,24 +1131,29 @@ class MasterBot:
         
         action, bot_id = parts
         
-        bot = await db.get_bot_by_id(bot_id)
+        bot_raw = await db.get_bot_by_id(bot_id)
+        bot = row_to_dict(bot_raw) if bot_raw else None
+        
         if not bot:
             await callback.answer("Бот не найден", show_alert=True)
             return
         
         # ✅ ДОБАВЛЕНО: Проверка владельца для всех операций управления
-        if bot.user_id != callback.from_user.id:
+        if bot.get('user_id') != callback.from_user.id:
             await callback.answer("❌ Только владелец может управлять ботом", show_alert=True)
             return
         
+        # Создаем объект-подобие для обратной совместимости
+        bot_obj = type('Bot', (), bot)()
+        
         if action == "configure":
-            await self._show_configure_instructions(callback, bot)
+            await self._show_configure_instructions(callback, bot_obj)
         elif action == "stats":
-            await self._show_bot_quick_stats(callback, bot)
+            await self._show_bot_quick_stats(callback, bot_obj)
         elif action == "restart":
-            await self._restart_bot(callback, bot)
+            await self._restart_bot(callback, bot_obj)
         elif action == "delete":
-            await self._show_delete_confirmation(callback, bot)
+            await self._show_delete_confirmation(callback, bot_obj)
     
     # ✅ BOT TOKEN INPUT
     
@@ -1160,9 +1198,13 @@ class MasterBot:
             # Add bot to bot manager if available
             if self.bot_manager:
                 try:
-                    bot_db_data = await db.get_bot_by_id(bot_id)
-                    await self.bot_manager.add_bot(bot_db_data)
-                    logger.info("Bot added to manager", bot_id=bot_id)
+                    bot_db_data_raw = await db.get_bot_by_id(bot_id)
+                    bot_db_data = row_to_dict(bot_db_data_raw) if bot_db_data_raw else None
+                    if bot_db_data:
+                        # Создаем объект-подобие для обратной совместимости
+                        bot_obj = type('Bot', (), bot_db_data)()
+                        await self.bot_manager.add_bot(bot_obj)
+                        logger.info("Bot added to manager", bot_id=bot_id)
                 except Exception as e:
                     logger.error("Failed to add bot to manager", bot_id=bot_id, error=str(e))
             
@@ -1256,13 +1298,15 @@ class MasterBot:
     
     async def _show_configure_instructions(self, callback: CallbackQuery, bot):
         """Show configuration instructions"""
+        bot_username = getattr(bot, 'bot_username', 'unknown')
+        
         text = f"""
-{Emoji.SETTINGS} <b>Настройка бота @{bot.bot_username}</b>
+{Emoji.SETTINGS} <b>Настройка бота @{bot_username}</b>
 
 {Emoji.NEW} <b>У каждого бота теперь есть собственная админ-панель!</b>
 
 {Emoji.ROCKET} <b>Для настройки:</b>
-1. Перейдите в чат с ботом @{bot.bot_username}
+1. Перейдите в чат с ботом @{bot_username}
 2. Отправьте команду <code>/start</code>
 3. Получите доступ к полной админ-панели
 
@@ -1286,14 +1330,14 @@ class MasterBot:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"📱 Написать @{bot.bot_username}",
-                    url=f"https://t.me/{bot.bot_username}"
+                    text=f"📱 Написать @{bot_username}",
+                    url=f"https://t.me/{bot_username}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text=f"{Emoji.BACK} К информации о боте",
-                    callback_data=f"bot_{bot.bot_id}"
+                    callback_data=f"bot_{getattr(bot, 'bot_id', 'unknown')}"
                 )
             ]
         ])
@@ -1301,12 +1345,15 @@ class MasterBot:
         await callback.message.edit_text(text, reply_markup=keyboard)
     
     async def _show_bot_quick_stats(self, callback: CallbackQuery, bot):
-        """Show quick bot statistics"""
+        """✅ ИСПРАВЛЕНО: Show quick bot statistics с безопасной обработкой БД"""
         try:
+            bot_id = getattr(bot, 'bot_id', None)
+            bot_username = getattr(bot, 'bot_username', 'unknown')
+            
             # Get real-time stats from bot manager
             bot_status = {"status": "unknown", "running": False}
-            if self.bot_manager:
-                bot_status = self.bot_manager.get_bot_status(bot.bot_id)
+            if self.bot_manager and bot_id:
+                bot_status = self.bot_manager.get_bot_status(bot_id)
             
             status_emoji = Emoji.SUCCESS if bot_status.get('running', False) else Emoji.ERROR
             status_text = "Активен" if bot_status.get('running', False) else "Остановлен"
@@ -1314,11 +1361,13 @@ class MasterBot:
             # Get button stats if available
             button_stats = bot_status.get('button_stats', {})
             
-            # ✅ НОВОЕ: Показываем статистику токенов OpenAI
+            # ✅ ИСПРАВЛЕНО: Показываем статистику токенов OpenAI с безопасной обработкой
             token_info = ""
             try:
                 # Пытаемся получить информацию о токенах пользователя
-                user_token_balance = await db.get_user_token_balance(callback.from_user.id)
+                user_token_balance_raw = await db.get_user_token_balance(callback.from_user.id)
+                user_token_balance = row_to_dict(user_token_balance_raw) if user_token_balance_raw else None
+                
                 if user_token_balance:
                     tokens_used = user_token_balance.get('total_used', 0)
                     tokens_limit = user_token_balance.get('limit', 500000)
@@ -1333,12 +1382,18 @@ class MasterBot:
             except Exception as token_error:
                 logger.warning("Could not get token balance for stats", error=str(token_error))
             
+            # Безопасное получение атрибутов бота
+            total_subscribers = getattr(bot, 'total_subscribers', 0)
+            total_messages_sent = getattr(bot, 'total_messages_sent', 0)
+            created_at = getattr(bot, 'created_at', datetime.now())
+            created_at_str = created_at.strftime('%d.%m.%Y в %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
+            
             text = f"""
-{Emoji.CHART} <b>Статистика @{bot.bot_username}</b>
+{Emoji.CHART} <b>Статистика @{bot_username}</b>
 
 {status_emoji} <b>Статус:</b> {status_text}
-{Emoji.USERS} <b>Подписчиков:</b> {bot.total_subscribers}
-{Emoji.BROADCAST} <b>Сообщений отправлено:</b> {bot.total_messages_sent}
+{Emoji.USERS} <b>Подписчиков:</b> {total_subscribers}
+{Emoji.BROADCAST} <b>Сообщений отправлено:</b> {total_messages_sent}
 {token_info}
 {Emoji.BUTTON} <b>Активность кнопок:</b>
 - Приветственных отправлено: {button_stats.get('welcome_buttons_sent', 0)}
@@ -1349,30 +1404,30 @@ class MasterBot:
 {Emoji.FUNNEL} <b>Воронки:</b>
 - Запущено: {button_stats.get('funnel_starts', 0)}
 
-{Emoji.CHART} <b>Создан:</b> {bot.created_at.strftime('%d.%m.%Y в %H:%M')}
+{Emoji.CHART} <b>Создан:</b> {created_at_str}
 
 {Emoji.INFO} <b>Подробная статистика:</b>
-Напишите боту @{bot.bot_username} команду /start
+Напишите боту @{bot_username} команду /start
 и перейдите в раздел "Статистика"
 """
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"📱 Админ-панель @{bot.bot_username}",
-                        url=f"https://t.me/{bot.bot_username}"
+                        text=f"📱 Админ-панель @{bot_username}",
+                        url=f"https://t.me/{bot_username}"
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         text="🔄 Обновить",
-                        callback_data=f"manage_stats_{bot.bot_id}"
+                        callback_data=f"manage_stats_{bot_id}"
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         text=f"{Emoji.BACK} К информации о боте",
-                        callback_data=f"bot_{bot.bot_id}"
+                        callback_data=f"bot_{bot_id}"
                     )
                 ]
             ])
@@ -1380,20 +1435,21 @@ class MasterBot:
             await callback.message.edit_text(text, reply_markup=keyboard)
             
         except Exception as e:
-            logger.error("Failed to show bot stats", bot_id=bot.bot_id, error=str(e))
+            logger.error("Failed to show bot stats", bot_id=getattr(bot, 'bot_id', 'unknown'), error=str(e))
             await callback.answer("Ошибка при загрузке статистики", show_alert=True)
     
     async def _restart_bot(self, callback: CallbackQuery, bot):
         """Restart bot"""
         try:
-            if self.bot_manager:
-                await self.bot_manager.restart_bot(bot.bot_id)
+            bot_id = getattr(bot, 'bot_id', None)
+            if self.bot_manager and bot_id:
+                await self.bot_manager.restart_bot(bot_id)
                 await callback.answer("Бот перезапущен!", show_alert=True)
                 
                 # Refresh bot info
                 await self.cb_bot_details(
                     callback=type('obj', (object,), {
-                        'data': f'bot_{bot.bot_id}',
+                        'data': f'bot_{bot_id}',
                         'answer': callback.answer,
                         'message': callback.message,
                         'from_user': callback.from_user
@@ -1403,15 +1459,18 @@ class MasterBot:
                 await callback.answer("Bot Manager недоступен", show_alert=True)
                 
         except Exception as e:
-            logger.error("Failed to restart bot", bot_id=bot.bot_id, error=str(e))
+            logger.error("Failed to restart bot", bot_id=getattr(bot, 'bot_id', 'unknown'), error=str(e))
             await callback.answer("Ошибка при перезапуске бота", show_alert=True)
     
     async def _show_delete_confirmation(self, callback: CallbackQuery, bot):
         """✅ ИСПРАВЛЕНО: Show bot deletion confirmation without temporary handler registration"""
+        bot_username = getattr(bot, 'bot_username', 'unknown')
+        bot_id = getattr(bot, 'bot_id', 'unknown')
+        
         text = f"""
 {Emoji.WARNING} <b>Удаление бота</b>
 
-Вы действительно хотите удалить бота @{bot.bot_username}?
+Вы действительно хотите удалить бота @{bot_username}?
 
 {Emoji.INFO} <b>Это действие:</b>
 - Удалит бота из системы
@@ -1430,13 +1489,13 @@ class MasterBot:
             [
                 InlineKeyboardButton(
                     text=f"{Emoji.DELETE} Да, удалить бота",
-                    callback_data=f"confirm_delete_{bot.bot_id}"
+                    callback_data=f"confirm_delete_{bot_id}"
                 )
             ],
             [
                 InlineKeyboardButton(
                     text=f"{Emoji.BACK} Отмена",
-                    callback_data=f"bot_{bot.bot_id}"
+                    callback_data=f"bot_{bot_id}"
                 )
             ]
         ])
@@ -1444,26 +1503,30 @@ class MasterBot:
         await callback.message.edit_text(text, reply_markup=keyboard)
     
     async def _confirm_delete_bot(self, callback: CallbackQuery):
-        """✅ ИСПРАВЛЕНО: Confirm bot deletion with owner verification"""
+        """✅ ИСПРАВЛЕНО: Confirm bot deletion with owner verification и безопасной обработкой БД"""
         await callback.answer()
         
         bot_id = callback.data.replace("confirm_delete_", "")
         
         try:
             # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверка владельца бота
-            bot = await db.get_bot_by_id(bot_id)
+            bot_raw = await db.get_bot_by_id(bot_id)
+            bot = row_to_dict(bot_raw) if bot_raw else None
+            
             if not bot:
                 await callback.answer("❌ Бот не найден", show_alert=True)
                 return
             
-            if bot.user_id != callback.from_user.id:
+            if bot.get('user_id') != callback.from_user.id:
                 await callback.answer("❌ Только владелец может удалить бота", show_alert=True)
                 return
+            
+            bot_username = bot.get('bot_username', 'unknown')
             
             logger.info("User confirmed bot deletion", 
                        user_id=callback.from_user.id,
                        bot_id=bot_id,
-                       bot_username=bot.bot_username)
+                       bot_username=bot_username)
             
             # Remove from bot manager
             if self.bot_manager:
@@ -1477,7 +1540,7 @@ class MasterBot:
             await db.delete_user_bot(bot_id)
             
             await callback.message.edit_text(
-                f"{Emoji.SUCCESS} <b>Бот @{bot.bot_username} успешно удален!</b>\n\n"
+                f"{Emoji.SUCCESS} <b>Бот @{bot_username} успешно удален!</b>\n\n"
                 f"Бот остановлен и удален из системы.\n"
                 f"Все настройки и статистика также удалены.\n\n"
                 f"💰 <b>Ваши токены OpenAI сохранены</b> и доступны для других ботов.",
@@ -1499,7 +1562,7 @@ class MasterBot:
             
             logger.info("Bot deleted successfully", 
                        bot_id=bot_id,
-                       bot_username=bot.bot_username,
+                       bot_username=bot_username,
                        owner_id=callback.from_user.id)
             
         except Exception as e:
@@ -1524,4 +1587,4 @@ class MasterBot:
 
 
 # В конце файла добавить логирование
-logger.info("🎉 MasterBot with Robokassa integration loaded successfully")
+logger.info("🎉 MasterBot with Robokassa integration and safe DB handling loaded successfully")
