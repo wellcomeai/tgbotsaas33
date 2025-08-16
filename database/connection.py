@@ -253,6 +253,39 @@ class DatabaseManager:
                 )
                 return result.scalar_one_or_none()
 
+    @staticmethod
+    async def create_payment_record(payment_data: dict):
+        """✅ ИСПРАВЛЕННЫЙ: Create payment record"""
+        from database.models import Payment
+        
+        try:
+            async with get_db_session() as session:
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем объект Payment, а не список
+                payment = Payment(**payment_data)
+                session.add(payment)
+                await session.commit()
+                await session.refresh(payment)
+                
+                logger.info("✅ Payment record created", 
+                           payment_id=payment.id,
+                           user_id=payment_data.get('user_id'),
+                           order_id=payment_data.get('order_id'))
+                
+                return {
+                    'id': payment.id,
+                    'user_id': payment.user_id,
+                    'order_id': payment.order_id,
+                    'amount': payment.amount,
+                    'status': payment.status
+                }
+                
+        except Exception as e:
+            logger.error("❌ Failed to create payment record", 
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        payment_data=payment_data)
+            raise
+
     # ===== SUBSCRIPTION METHODS =====
 
     @staticmethod
@@ -304,34 +337,43 @@ class DatabaseManager:
 
     @staticmethod
     async def get_active_subscription(user_id: int):
-        """Get active subscription for user"""
+        """✅ ИСПРАВЛЕННЫЙ: Get active subscription for user"""
         from database.models import Subscription
         from sqlalchemy import select, and_
         
-        async with get_db_session() as session:
-            result = await session.execute(
-                select(Subscription).where(
-                    and_(
-                        Subscription.user_id == user_id,
-                        Subscription.status == 'active',
-                        Subscription.end_date > datetime.now()
-                    )
-                ).order_by(Subscription.end_date.desc())
-            )
-            subscription = result.scalar_one_or_none()
-            
-            if subscription:
-                return {
-                    'id': subscription.id,
-                    'user_id': subscription.user_id,
-                    'plan_id': subscription.plan_id,
-                    'plan_name': subscription.plan_name,
-                    'order_id': subscription.order_id,
-                    'status': subscription.status,
-                    'start_date': subscription.start_date,
-                    'end_date': subscription.end_date,
-                    'amount': subscription.amount
-                }
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(Subscription).where(
+                        and_(
+                            Subscription.user_id == user_id,
+                            Subscription.status == 'active',
+                            Subscription.end_date > datetime.now()
+                        )
+                    ).order_by(Subscription.end_date.desc())
+                )
+                subscription = result.scalar_one_or_none()
+                
+                if subscription:
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь, а не объект
+                    return {
+                        'id': subscription.id,
+                        'user_id': subscription.user_id,
+                        'plan_id': subscription.plan_id,
+                        'plan_name': subscription.plan_name,
+                        'order_id': subscription.order_id,
+                        'status': subscription.status,
+                        'start_date': subscription.start_date,
+                        'end_date': subscription.end_date,
+                        'amount': subscription.amount
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error("❌ Failed to get active subscription", 
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        user_id=user_id)
             return None
 
     @staticmethod
@@ -370,8 +412,6 @@ class DatabaseManager:
     @staticmethod
     async def get_subscription_stats():
         """Get subscription statistics"""
-        from sqlalchemy import text
-        
         try:
             query = """
                 SELECT 
