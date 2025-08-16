@@ -3,6 +3,8 @@ import signal
 import sys
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Optional
 from aiohttp import web, web_runner
 import aiohttp
 
@@ -17,6 +19,33 @@ from database import init_database, close_database
 from bots import MasterBot
 from services import BotManager
 from services.scheduler.message_limit_reset import message_limit_scheduler
+
+# ✅ БЕЗОПАСНЫЕ ИМПОРТЫ для платежной системы
+try:
+    from services.payments.robokassa_service import robokassa_service
+    from services.payments.subscription_manager import subscription_manager
+    PAYMENTS_AVAILABLE = True
+except ImportError as e:
+    robokassa_service = None
+    subscription_manager = None
+    PAYMENTS_AVAILABLE = False
+    structlog.get_logger().warning("Payment services not available", error=str(e))
+
+try:
+    from services.notifications.payment_notifier import payment_notifier
+    PAYMENT_NOTIFIER_AVAILABLE = True
+except ImportError as e:
+    payment_notifier = None
+    PAYMENT_NOTIFIER_AVAILABLE = False
+    structlog.get_logger().warning("Payment notifier not available", error=str(e))
+
+try:
+    from services.scheduler.subscription_checker import subscription_checker
+    SUBSCRIPTION_CHECKER_AVAILABLE = True
+except ImportError as e:
+    subscription_checker = None
+    SUBSCRIPTION_CHECKER_AVAILABLE = False
+    structlog.get_logger().warning("Subscription checker not available", error=str(e))
 
 # ✅ ВСТРОЕННАЯ МИГРАЦИЯ - всегда доступна
 async def run_auto_migrations():
@@ -132,7 +161,7 @@ logger = structlog.get_logger()
 
 
 class BotFactory:
-    """Main Bot Factory application"""
+    """Main Bot Factory application with full Robokassa integration"""
     
     def __init__(self):
         self.master_bot = None
@@ -140,32 +169,21 @@ class BotFactory:
         self.web_app = None
         self.web_runner = None
         self.running = False
-        self.scheduler_task = None
-    
-    async def health_check(self, request):
-        """Health check endpoint"""
-        bot_statuses = {}
-        if self.bot_manager:
-            bot_statuses = self.bot_manager.get_all_bot_statuses()
         
-        return web.json_response({
-            "status": "healthy",
-            "app": settings.app_name,
-            "version": settings.app_version,
-            "running": self.running,
-            "master_bot_running": self.master_bot is not None,
-            "user_bots_count": len(bot_statuses),
-            "active_user_bots": sum(1 for status in bot_statuses.values() if status.get('running', False)),
-            "migrations_available": True,  # ✅ Теперь всегда доступны
-            "scheduler_running": self.scheduler_task is not None and not self.scheduler_task.done()
-        })
+        # ✅ СУЩЕСТВУЮЩИЙ планировщик сообщений
+        self.message_scheduler_task = None
+        
+        # ✅ НОВЫЙ планировщик подписок (если доступен)
+        self.subscription_checker_task: Optional[asyncio.Task] = None
     
     async def startup(self):
-        """Application startup with automatic migrations"""
+        """Application startup with full payments integration"""
         try:
-            logger.info("🚀 Starting Bot Factory", 
+            logger.info("🚀 Starting Bot Factory with enhanced integration", 
                        version=settings.app_version,
-                       auto_migrations=True)
+                       payments_available=PAYMENTS_AVAILABLE,
+                       payment_notifier_available=PAYMENT_NOTIFIER_AVAILABLE,
+                       subscription_checker_available=SUBSCRIPTION_CHECKER_AVAILABLE)
             
             # ✅ ВСЕГДА запускаем миграции перед инициализацией БД
             logger.info("🔄 Running automatic database migrations...")
@@ -192,6 +210,12 @@ class BotFactory:
             # Initialize master bot
             logger.info("👑 Creating Master Bot...")
             self.master_bot = MasterBot(self.bot_manager)
+            
+            # ✅ НОВОЕ: Настраиваем payment_notifier если доступен
+            if PAYMENT_NOTIFIER_AVAILABLE and payment_notifier and self.master_bot:
+                payment_notifier.set_bot(self.master_bot.bot)
+                logger.info("💬 Payment notifier configured with master bot")
+            
             logger.info("✅ Master bot created successfully")
             
             # Setup web server for health checks
@@ -199,6 +223,14 @@ class BotFactory:
             self.web_app = web.Application()
             self.web_app.router.add_get("/health", self.health_check)
             self.web_app.router.add_get("/", self.health_check)
+            
+            # ✅ НОВОЕ: Добавляем роуты для платежей (если доступны)
+            if PAYMENTS_AVAILABLE:
+                logger.info("💳 Adding payment webhook routes...")
+                self.web_app.router.add_post("/webhook/robokassa", self.handle_robokassa_webhook)
+                self.web_app.router.add_get("/payment/success", self.payment_success_page)
+                self.web_app.router.add_get("/payment/fail", self.payment_fail_page)
+                logger.info("✅ Payment routes added successfully")
             
             # Start web server
             self.web_runner = web_runner.AppRunner(self.web_app)
@@ -211,8 +243,18 @@ class BotFactory:
             
             logger.info("🌐 Web server started successfully", port=port)
             
+            # ✅ НОВОЕ: Запускаем планировщик проверки подписок
+            if SUBSCRIPTION_CHECKER_AVAILABLE and subscription_checker:
+                logger.info("⏰ Starting subscription checker...")
+                self.subscription_checker_task = asyncio.create_task(
+                    subscription_checker.start()
+                )
+                logger.info("✅ Subscription checker started successfully")
+            else:
+                logger.warning("⚠️ Subscription checker not available")
+            
             self.running = True
-            logger.info("🎉 Bot Factory startup completed successfully!")
+            logger.info("🎉 Bot Factory with full payment integration started successfully!")
             
         except Exception as e:
             logger.error("💥 Failed to start Bot Factory", error=str(e), exc_info=True)
@@ -220,21 +262,36 @@ class BotFactory:
             raise
     
     async def shutdown(self):
-        """Application shutdown"""
-        logger.info("🛑 Shutting down Bot Factory")
+        """Application shutdown with payment services cleanup"""
+        logger.info("🛑 Shutting down Bot Factory with payment services")
         self.running = False
         
         try:
-            # ✅ NEW: Stop message limit scheduler
-            if self.scheduler_task and not self.scheduler_task.done():
+            # ✅ СУЩЕСТВУЮЩИЙ: Stop message limit scheduler
+            if self.message_scheduler_task and not self.message_scheduler_task.done():
                 logger.info("⏰ Stopping message limit scheduler...")
-                self.scheduler_task.cancel()
+                message_limit_scheduler.stop()
                 try:
-                    await self.scheduler_task
+                    await self.message_scheduler_task
                 except asyncio.CancelledError:
                     logger.info("✅ Message limit scheduler stopped")
                 except Exception as e:
-                    logger.warning("⚠️ Error stopping scheduler", error=str(e))
+                    logger.warning("⚠️ Error stopping message scheduler", error=str(e))
+            
+            # ✅ НОВОЕ: Stop subscription checker (если доступен)
+            if (SUBSCRIPTION_CHECKER_AVAILABLE and 
+                subscription_checker and 
+                self.subscription_checker_task and 
+                not self.subscription_checker_task.done()):
+                
+                logger.info("⏰ Stopping subscription checker...")
+                await subscription_checker.stop()
+                try:
+                    await self.subscription_checker_task
+                except asyncio.CancelledError:
+                    logger.info("✅ Subscription checker stopped")
+                except Exception as e:
+                    logger.warning("⚠️ Error stopping subscription checker", error=str(e))
             
             # ✅ NEW: Close AI client
             try:
@@ -268,12 +325,224 @@ class BotFactory:
         except Exception as e:
             logger.error("💥 Error during shutdown", error=str(e))
         
-        logger.info("✅ Bot Factory shutdown completed")
+        logger.info("✅ Bot Factory with payment services shutdown completed")
+    
+    # ✅ НОВЫЕ методы платежей (только если PAYMENTS_AVAILABLE)
+    
+    async def handle_robokassa_webhook(self, request):
+        """Обработка webhook от Robokassa (только если платежи доступны)"""
+        if not PAYMENTS_AVAILABLE:
+            return web.Response(text="Payments not available", status=503)
+        
+        logger.info("📥 Received Robokassa webhook")
+        
+        try:
+            # Получаем данные из запроса
+            form_data = await request.post()
+            webhook_data = dict(form_data)
+            
+            logger.info("🔍 Processing webhook data", order_id=webhook_data.get('InvId'))
+            
+            # Проверяем подпись
+            if not robokassa_service.verify_webhook_signature(webhook_data):
+                logger.error("❌ Invalid webhook signature")
+                return web.Response(text="Invalid signature", status=400)
+            
+            # Обрабатываем успешную оплату
+            result = await subscription_manager.process_successful_payment(webhook_data)
+            
+            if result.get('success'):
+                logger.info("✅ Payment processed successfully", order_id=webhook_data.get('InvId'))
+                
+                # Отправляем уведомление пользователю
+                if result.get('payment_data') and result.get('subscription'):
+                    await self._notify_user_about_payment(
+                        result['payment_data'], 
+                        result['subscription']
+                    )
+                
+                return web.Response(text="OK", status=200)
+            else:
+                logger.error("❌ Failed to process payment", error=result.get('error'))
+                return web.Response(text="Processing failed", status=500)
+            
+        except Exception as e:
+            logger.error("💥 Error processing webhook", error=str(e), exc_info=True)
+            return web.Response(text="Internal error", status=500)
+    
+    async def payment_success_page(self, request):
+        """Страница успешной оплаты"""
+        if not PAYMENTS_AVAILABLE:
+            return web.Response(text="Payments not available", status=503)
+            
+        return web.Response(text="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Оплата прошла успешно!</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                .success { color: green; font-size: 24px; margin: 20px 0; }
+                .info { color: #666; font-size: 16px; }
+            </style>
+        </head>
+        <body>
+            <div class="success">✅ Оплата прошла успешно!</div>
+            <div class="info">
+                Подписка активирована автоматически.<br>
+                Вернитесь в Bot Factory и наслаждайтесь всеми возможностями!
+            </div>
+        </body>
+        </html>
+        """, content_type='text/html')
+    
+    async def payment_fail_page(self, request):
+        """Страница неудачной оплаты"""
+        if not PAYMENTS_AVAILABLE:
+            return web.Response(text="Payments not available", status=503)
+            
+        return web.Response(text="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Ошибка оплаты</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                .error { color: red; font-size: 24px; margin: 20px 0; }
+                .info { color: #666; font-size: 16px; }
+            </style>
+        </head>
+        <body>
+            <div class="error">❌ Ошибка оплаты</div>
+            <div class="info">
+                Оплата не была завершена.<br>
+                Пожалуйста, попробуйте еще раз или обратитесь в поддержку.
+            </div>
+        </body>
+        </html>
+        """, content_type='text/html')
+    
+    # ✅ ОБНОВЛЕННЫЙ метод _notify_user_about_payment
+    async def _notify_user_about_payment(self, payment_data: dict, subscription: dict):
+        """Уведомление пользователя об успешной оплате через payment_notifier"""
+        if not PAYMENT_NOTIFIER_AVAILABLE or not payment_notifier:
+            logger.warning("Payment notifier not available, skipping notification")
+            return
+            
+        try:
+            # Используем centralized payment notifier
+            await payment_notifier.send_payment_success_notification(
+                user_id=payment_data['user_id'],
+                subscription=subscription,
+                payment_data=payment_data
+            )
+            
+            # ✅ НОВОЕ: Отправляем уведомление администратору (если настроен admin_chat_id)
+            admin_chat_id = getattr(settings, 'admin_chat_id', None)
+            if admin_chat_id:
+                await payment_notifier.send_admin_payment_notification(
+                    admin_chat_id=admin_chat_id,
+                    payment_data=payment_data,
+                    subscription=subscription
+                )
+            
+        except Exception as e:
+            logger.error("❌ Failed to notify about payment via payment_notifier",
+                        error=str(e),
+                        user_id=payment_data.get('user_id'))
+    
+    async def health_check(self, request):
+        """Enhanced health check with full payment system status"""
+        bot_statuses = {}
+        if self.bot_manager:
+            bot_statuses = self.bot_manager.get_all_bot_statuses()
+        
+        # Payment system stats (только если доступны)
+        payment_stats = {}
+        subscription_checker_stats = {}
+        
+        if PAYMENTS_AVAILABLE and subscription_manager:
+            try:
+                payment_stats = await subscription_manager.get_subscription_stats()
+            except Exception as e:
+                logger.warning("Failed to get payment stats for health check", error=str(e))
+                payment_stats = {"error": str(e)}
+        
+        if SUBSCRIPTION_CHECKER_AVAILABLE and subscription_checker:
+            try:
+                subscription_checker_stats = await subscription_checker.get_stats()
+            except Exception as e:
+                logger.warning("Failed to get subscription checker stats", error=str(e))
+                subscription_checker_stats = {"error": str(e)}
+        
+        return web.json_response({
+            "status": "healthy",
+            "app": settings.app_name,
+            "version": settings.app_version,
+            "running": self.running,
+            "timestamp": datetime.now().isoformat(),
+            
+            # Bot stats
+            "master_bot_running": self.master_bot is not None,
+            "user_bots_count": len(bot_statuses),
+            "active_user_bots": sum(1 for status in bot_statuses.values() if status.get('running', False)),
+            "migrations_available": True,  # ✅ Теперь всегда доступны
+            "message_scheduler_running": self.message_scheduler_task is not None and not self.message_scheduler_task.done(),
+            
+            # Payment system (только если доступно)
+            "payments_available": PAYMENTS_AVAILABLE,
+            "payment_notifier_available": PAYMENT_NOTIFIER_AVAILABLE,
+            "subscription_checker_available": SUBSCRIPTION_CHECKER_AVAILABLE,
+            "robokassa_integration": PAYMENTS_AVAILABLE,
+            "robokassa_test_mode": getattr(settings, 'robokassa_test_mode', None) if PAYMENTS_AVAILABLE else None,
+            "payment_notifier_configured": PAYMENT_NOTIFIER_AVAILABLE and payment_notifier and payment_notifier.bot is not None,
+            "subscription_checker_running": subscription_checker.running if (SUBSCRIPTION_CHECKER_AVAILABLE and subscription_checker) else False,
+            
+            # Stats
+            "payment_stats": payment_stats,
+            "subscription_checker_stats": subscription_checker_stats,
+            
+            # API endpoints (зависят от доступности сервисов)
+            "webhook_endpoints": [
+                "/webhook/robokassa",
+                "/payment/success", 
+                "/payment/fail"
+            ] if PAYMENTS_AVAILABLE else [],
+            
+            # Configuration
+            "features": {
+                "robokassa_payments": PAYMENTS_AVAILABLE,
+                "subscription_management": PAYMENTS_AVAILABLE,
+                "payment_notifications": PAYMENT_NOTIFIER_AVAILABLE,
+                "expiry_warnings": SUBSCRIPTION_CHECKER_AVAILABLE,
+                "admin_notifications": hasattr(settings, 'admin_chat_id'),
+                "message_limit_scheduler": True  # всегда доступен
+            }
+        })
     
     async def run(self):
-        """Run the application"""
+        """Run the application with all schedulers"""
         try:
             await self.startup()
+            
+            # ✅ СУЩЕСТВУЮЩИЙ: Запускаем планировщик сброса лимитов сообщений
+            logger.info("⏰ Starting message limit scheduler...")
+            try:
+                self.message_scheduler_task = asyncio.create_task(message_limit_scheduler.start())
+                logger.info("✅ Message limit scheduler started successfully")
+            except Exception as e:
+                logger.error("💥 Failed to start message limit scheduler", error=str(e))
+            
+            # ✅ НОВОЕ: Запускаем планировщик проверки подписок (если доступен)
+            if SUBSCRIPTION_CHECKER_AVAILABLE and subscription_checker:
+                logger.info("⏰ Starting subscription checker...")
+                try:
+                    self.subscription_checker_task = asyncio.create_task(subscription_checker.start())
+                    logger.info("✅ Subscription checker started successfully")
+                except Exception as e:
+                    logger.error("💥 Failed to start subscription checker", error=str(e))
             
             if self.master_bot:
                 # Run master bot
@@ -310,7 +579,7 @@ def setup_signal_handlers(bot_factory: BotFactory):
 
 
 async def main():
-    """Main application entry point"""
+    """Main application entry point with payment integration"""
     
     # Validate configuration
     if not settings.master_bot_token:
@@ -321,6 +590,28 @@ async def main():
         logger.error("❌ DATABASE_URL is required")
         sys.exit(1)
     
+    # ✅ НОВОЕ: Проверяем настройки Robokassa (только если платежи доступны)
+    if PAYMENTS_AVAILABLE:
+        if not all([
+            getattr(settings, 'robokassa_merchant_login', None),
+            getattr(settings, 'robokassa_password1', None), 
+            getattr(settings, 'robokassa_password2', None),
+            getattr(settings, 'webhook_base_url', None)
+        ]):
+            logger.error("❌ Robokassa configuration incomplete")
+            logger.error("Required: ROBOKASSA_MERCHANT_LOGIN, ROBOKASSA_PASSWORD1, ROBOKASSA_PASSWORD2, WEBHOOK_BASE_URL")
+            logger.error("Payments will be disabled")
+            # Не останавливаем приложение, просто отключаем платежи
+        else:
+            # ✅ НОВОЕ: Логируем конфигурацию платежей
+            logger.info("💳 Robokassa configuration loaded", 
+                       merchant=settings.robokassa_merchant_login,
+                       test_mode=getattr(settings, 'robokassa_test_mode', True),
+                       webhook_url=f"{settings.webhook_base_url}/webhook/robokassa",
+                       plans_count=len(getattr(settings, 'subscription_plans', {})))
+    else:
+        logger.info("💳 Payment services not available, running without Robokassa integration")
+    
     # ✅ NEW: Log environment info for debugging
     logger.info("🚀 Starting Bot Factory", 
                environment="production" if not settings.debug else "development",
@@ -330,15 +621,6 @@ async def main():
     # Create and run bot factory
     bot_factory = BotFactory()
     setup_signal_handlers(bot_factory)
-    
-    # ✅ NEW: Запускаем планировщик сброса лимитов
-    logger.info("⏰ Starting message limit scheduler...")
-    try:
-        bot_factory.scheduler_task = asyncio.create_task(message_limit_scheduler.start())
-        logger.info("✅ Message limit scheduler started successfully")
-    except Exception as e:
-        logger.error("💥 Failed to start message limit scheduler", error=str(e))
-        # Продолжаем работу даже если планировщик не запустился
     
     try:
         await bot_factory.run()
@@ -365,3 +647,9 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error("💥 Failed to run application", error=str(e))
         sys.exit(1)
+
+# ✅ ДОБАВИТЬ в конец файла
+logger.info("🎉 Bot Factory main module loaded",
+           payments_available=PAYMENTS_AVAILABLE,
+           payment_notifier_available=PAYMENT_NOTIFIER_AVAILABLE,
+           subscription_checker_available=SUBSCRIPTION_CHECKER_AVAILABLE)
