@@ -181,7 +181,7 @@ class SubscriptionChecker:
         try:
             # Проверяем в метаданных подписки, отправляли ли уже это предупреждение
             query = """
-                SELECT metadata FROM subscriptions 
+                SELECT extra_data FROM subscriptions 
                 WHERE id = $1
             """
             
@@ -189,8 +189,8 @@ class SubscriptionChecker:
             if not row:
                 return True
             
-            metadata = row[0] or {}
-            warnings_sent = metadata.get('warnings_sent', [])
+            extra_data = row[0] or {}
+            warnings_sent = extra_data.get('warnings_sent', [])
             
             # Если уже отправляли предупреждение для этого количества дней - не отправляем
             return days_left not in warnings_sent
@@ -207,10 +207,10 @@ class SubscriptionChecker:
             # Обновляем метаданные подписки
             query = """
                 UPDATE subscriptions 
-                SET metadata = COALESCE(metadata, '{}'::jsonb) || 
+                SET extra_data = COALESCE(extra_data, '{}'::jsonb) || 
                               jsonb_build_object(
                                   'warnings_sent', 
-                                  COALESCE(metadata->'warnings_sent', '[]'::jsonb) || 
+                                  COALESCE(extra_data->'warnings_sent', '[]'::jsonb) || 
                                   to_jsonb($2::int)
                               )
                 WHERE id = $1
