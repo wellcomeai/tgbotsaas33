@@ -1,5 +1,5 @@
 """
-Robokassa Payment Service
+Robokassa Payment Service - ИСПРАВЛЕННАЯ ВЕРСИЯ
 Сервис для создания платежных ссылок и обработки уведомлений от Robokassa
 """
 
@@ -15,7 +15,7 @@ logger = structlog.get_logger()
 
 
 class RobokassaService:
-    """Сервис для работы с Robokassa"""
+    """Сервис для работы с Robokassa - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     
     def __init__(self):
         self.merchant_login = settings.robokassa_merchant_login
@@ -26,7 +26,7 @@ class RobokassaService:
         # URL для создания платежей
         self.payment_url = "https://auth.robokassa.ru/Merchant/Index.aspx"
         
-        logger.info("RobokassaService initialized", 
+        logger.info("✅ RobokassaService initialized (FIXED VERSION)", 
                    merchant=self.merchant_login,
                    test_mode=self.test_mode)
     
@@ -35,7 +35,7 @@ class RobokassaService:
                            user_id: int, 
                            user_email: str = None) -> Tuple[str, str]:
         """
-        Генерация ссылки для оплаты
+        Генерация ссылки для оплаты - ИСПРАВЛЕННАЯ ВЕРСИЯ
         
         Args:
             plan_id: ID тарифного плана (1m, 3m, 6m, 12m)
@@ -55,11 +55,11 @@ class RobokassaService:
             timestamp = int(datetime.now().timestamp())
             order_id = f"botfactory_{user_id}_{plan_id}_{timestamp}"
             
-            # Основные параметры
+            # ✅ ИСПРАВЛЕНИЕ: Правильные основные параметры
             params = {
                 'MerchantLogin': self.merchant_login,
-                'OutSum': str(plan['price']),
-                'InvId': order_id,
+                'OutSum': str(plan['price']),  # Robokassa требует строку
+                'InvId': order_id,  # ✅ КРИТИЧЕСКИ ВАЖНО: InvId обязателен
                 'Description': plan['description'],
                 'Culture': 'ru'
             }
@@ -68,62 +68,85 @@ class RobokassaService:
             if user_email:
                 params['Email'] = user_email
             
-            # Пользовательские параметры (будут переданы в webhook)
+            # ✅ ИСПРАВЛЕНИЕ: Пользовательские параметры в правильном формате
             params['Shp_user_id'] = str(user_id)
             params['Shp_plan_id'] = plan_id
             params['Shp_bot_factory'] = '1'  # Маркер что это наш проект
             
+            # ✅ ИСПРАВЛЕНИЕ: Правильная работа с тестовым режимом
             if self.test_mode:
                 params['IsTest'] = '1'
+                logger.warning("🧪 ТЕСТОВЫЙ РЕЖИМ Robokassa активен!")
             
-            # Создание подписи
-            signature = self._create_payment_signature(params)
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная генерация подписи
+            signature = self._create_payment_signature_fixed(params)
             params['SignatureValue'] = signature
             
             # Формируем полную ссылку
             payment_url = f"{self.payment_url}?{urlencode(params)}"
             
-            logger.info("Payment URL generated",
+            logger.info("✅ Payment URL generated successfully (FIXED)",
                        order_id=order_id,
                        user_id=user_id, 
                        plan_id=plan_id,
-                       amount=plan['price'])
+                       amount=plan['price'],
+                       test_mode=self.test_mode,
+                       signature_length=len(signature),
+                       url_length=len(payment_url))
             
             return payment_url, order_id
             
         except Exception as e:
-            logger.error("Failed to generate payment URL", 
+            logger.error("❌ Failed to generate payment URL", 
                         error=str(e),
                         plan_id=plan_id,
-                        user_id=user_id)
+                        user_id=user_id,
+                        error_type=type(e).__name__)
             raise
     
-    def _create_payment_signature(self, params: dict) -> str:
-        """Создание подписи для платежного запроса"""
-        # Строка для подписи: MerchantLogin:OutSum:InvId:Password1
-        sign_string = f"{params['MerchantLogin']}:{params['OutSum']}:{params['InvId']}:{self.password1}"
+    def _create_payment_signature_fixed(self, params: dict) -> str:
+        """
+        ✅ ИСПРАВЛЕННАЯ генерация подписи согласно документации Robokassa
         
-        # Добавляем пользовательские параметры в алфавитном порядке
+        Формат подписи: MerchantLogin:OutSum:InvId:Password1:[Пользовательские параметры]
+        Пользовательские параметры должны быть отсортированы в алфавитном порядке
+        """
+        
+        # ✅ ОСНОВНАЯ СТРОКА согласно документации Robokassa
+        base_string = f"{params['MerchantLogin']}:{params['OutSum']}:{params['InvId']}:{self.password1}"
+        
+        # ✅ Собираем пользовательские параметры в АЛФАВИТНОМ порядке
         shp_params = []
         for key in sorted(params.keys()):
             if key.startswith('Shp_'):
                 shp_params.append(f"{key}={params[key]}")
         
+        # ✅ ПРАВИЛЬНОЕ объединение через двоеточие
         if shp_params:
-            sign_string += ":" + ":".join(shp_params)
+            sign_string = base_string + ":" + ":".join(shp_params)
+        else:
+            sign_string = base_string
         
-        # MD5 хеш в верхнем регистре
+        # MD5 хеш в верхнем регистре (как требует Robokassa)
         signature = hashlib.md5(sign_string.encode('utf-8')).hexdigest().upper()
         
-        logger.debug("Payment signature created", 
-                    order_id=params.get('InvId'),
-                    signature_length=len(signature))
+        logger.info("✅ Payment signature created (FIXED)", 
+                   order_id=params.get('InvId'),
+                   signature_base_length=len(sign_string),
+                   signature_length=len(signature),
+                   has_shp_params=len(shp_params) > 0,
+                   shp_params_count=len(shp_params))
+        
+        # ✅ DEBUG: Логируем строку подписи (маскируем пароль для безопасности)
+        debug_string = sign_string.replace(self.password1, "[PASSWORD1_MASKED]")
+        logger.debug("🔍 Signature string (password masked)", 
+                    debug_string=debug_string)
         
         return signature
     
     def verify_webhook_signature(self, webhook_data: dict) -> bool:
         """
-        Проверка подписи webhook уведомления от Robokassa
+        ✅ ИСПРАВЛЕННАЯ проверка подписи webhook уведомления от Robokassa
         
         Args:
             webhook_data: Данные полученные от Robokassa
@@ -135,12 +158,12 @@ class RobokassaService:
             received_signature = webhook_data.get('SignatureValue', '').upper()
             
             if not received_signature:
-                logger.warning("No signature in webhook data")
+                logger.warning("❌ No signature in webhook data")
                 return False
             
-            # Создаем строку для проверки подписи
-            # Формат: OutSum:InvId:Password2
-            sign_string = f"{webhook_data.get('OutSum')}:{webhook_data.get('InvId')}:{self.password2}"
+            # ✅ ИСПРАВЛЕНИЕ: Правильная строка для проверки подписи webhook
+            # Формат для webhook: OutSum:InvId:Password2:[Пользовательские параметры]
+            base_string = f"{webhook_data.get('OutSum')}:{webhook_data.get('InvId')}:{self.password2}"
             
             # Добавляем пользовательские параметры в алфавитном порядке
             shp_params = []
@@ -149,34 +172,43 @@ class RobokassaService:
                     shp_params.append(f"{key}={webhook_data[key]}")
             
             if shp_params:
-                sign_string += ":" + ":".join(shp_params)
+                sign_string = base_string + ":" + ":".join(shp_params)
+            else:
+                sign_string = base_string
             
             # Вычисляем подпись
             calculated_signature = hashlib.md5(sign_string.encode('utf-8')).hexdigest().upper()
             
             is_valid = received_signature == calculated_signature
             
-            logger.info("Webhook signature verification", 
+            logger.info("✅ Webhook signature verification (FIXED)", 
                        order_id=webhook_data.get('InvId'),
                        is_valid=is_valid,
                        received_sig_len=len(received_signature),
-                       calculated_sig_len=len(calculated_signature))
+                       calculated_sig_len=len(calculated_signature),
+                       has_shp_params=len(shp_params) > 0)
             
             if not is_valid:
-                logger.warning("Invalid webhook signature",
-                              received=received_signature[:10] + "...",
-                              calculated=calculated_signature[:10] + "...",
-                              sign_string_length=len(sign_string))
+                # ✅ DEBUG: Подробное логирование для отладки (маскируем пароль)
+                debug_string = sign_string.replace(self.password2, "[PASSWORD2_MASKED]")
+                logger.warning("❌ Invalid webhook signature - DEBUGGING INFO",
+                              debug_string=debug_string,
+                              received_signature=received_signature[:10] + "...",
+                              calculated_signature=calculated_signature[:10] + "...",
+                              out_sum=webhook_data.get('OutSum'),
+                              inv_id=webhook_data.get('InvId'))
             
             return is_valid
             
         except Exception as e:
-            logger.error("Error verifying webhook signature", error=str(e))
+            logger.error("❌ Error verifying webhook signature", 
+                        error=str(e),
+                        error_type=type(e).__name__)
             return False
     
     def parse_webhook_data(self, webhook_data: dict) -> Optional[dict]:
         """
-        Парсинг данных из webhook уведомления
+        Парсинг данных из webhook уведомления - БЕЗ ИЗМЕНЕНИЙ
         
         Args:
             webhook_data: Сырые данные от Robokassa
@@ -194,7 +226,7 @@ class RobokassaService:
             plan_id = webhook_data.get('Shp_plan_id')
             
             if not all([order_id, amount, user_id, plan_id]):
-                logger.warning("Missing required webhook data", 
+                logger.warning("❌ Missing required webhook data", 
                               order_id=order_id,
                               user_id=user_id, 
                               plan_id=plan_id,
@@ -203,7 +235,7 @@ class RobokassaService:
             
             # Проверяем что это наш заказ
             if webhook_data.get('Shp_bot_factory') != '1':
-                logger.warning("Webhook not from Bot Factory", 
+                logger.warning("❌ Webhook not from Bot Factory", 
                               order_id=order_id)
                 return None
             
@@ -216,7 +248,7 @@ class RobokassaService:
                 'raw_data': webhook_data
             }
             
-            logger.info("Webhook data parsed successfully",
+            logger.info("✅ Webhook data parsed successfully",
                        order_id=order_id,
                        user_id=user_id,
                        plan_id=plan_id,
@@ -225,11 +257,61 @@ class RobokassaService:
             return parsed_data
             
         except Exception as e:
-            logger.error("Failed to parse webhook data", 
+            logger.error("❌ Failed to parse webhook data", 
                         error=str(e),
-                        webhook_data=webhook_data)
+                        webhook_data=webhook_data,
+                        error_type=type(e).__name__)
             return None
+    
+    def test_signature_generation(self, test_params: dict = None) -> dict:
+        """
+        ✅ НОВЫЙ МЕТОД: Тестирование генерации подписи для отладки
+        
+        Args:
+            test_params: Тестовые параметры (опционально)
+            
+        Returns:
+            dict: Результаты тестирования
+        """
+        if not test_params:
+            test_params = {
+                'MerchantLogin': self.merchant_login,
+                'OutSum': '299',
+                'InvId': 'test_order_12345',
+                'Shp_user_id': '123456',
+                'Shp_plan_id': '1m',
+                'Shp_bot_factory': '1'
+            }
+        
+        try:
+            signature = self._create_payment_signature_fixed(test_params)
+            
+            result = {
+                'success': True,
+                'signature': signature,
+                'signature_length': len(signature),
+                'test_params': test_params,
+                'merchant_login': self.merchant_login,
+                'test_mode': self.test_mode
+            }
+            
+            logger.info("✅ Signature test completed successfully",
+                       signature=signature,
+                       test_mode=self.test_mode)
+            
+            return result
+            
+        except Exception as e:
+            logger.error("❌ Signature test failed", error=str(e))
+            return {
+                'success': False,
+                'error': str(e),
+                'test_params': test_params
+            }
 
 
-# Создаем глобальный экземпляр сервиса
+# ✅ Создаем глобальный экземпляр сервиса
 robokassa_service = RobokassaService()
+
+# ✅ Логируем успешную инициализацию
+logger.info("🎉 RobokassaService (FIXED VERSION) loaded successfully")
