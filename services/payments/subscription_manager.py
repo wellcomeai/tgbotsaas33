@@ -16,6 +16,142 @@ logger = structlog.get_logger()
 class SubscriptionManager:
     """Менеджер подписок пользователей"""
     
+    async def process_successful_payment(self, payment_data: dict) -> dict:
+        """
+        ✅ Обработка успешного платежа от Robokassa
+        
+        Args:
+            payment_data: Обработанные данные платежа
+            
+        Returns:
+            dict: Результат обработки
+        """
+        try:
+            user_id = payment_data['user_id']
+            plan_id = payment_data['plan_id']
+            order_id = payment_data['order_id']
+            amount = payment_data['amount']
+            
+            logger.info("🎯 Processing successful payment",
+                       user_id=user_id,
+                       plan_id=plan_id,
+                       order_id=order_id,
+                       amount=amount)
+            
+            # ✅ Проверяем что заказ еще не обработан (защита от дублирования)
+            existing = await db.get_subscription_by_order_id(order_id)
+            if existing:
+                logger.warning("⚠️ Payment already processed", 
+                              order_id=order_id,
+                              existing_id=existing.get('id'),
+                              existing_status=existing.get('status'))
+                
+                return {
+                    'success': True,
+                    'already_processed': True,
+                    'subscription': existing,
+                    'payment_data': payment_data,
+                    'message': 'Payment was already processed'
+                }
+            
+            # ✅ Проверяем что план существует
+            plan = settings.subscription_plans.get(plan_id)
+            if not plan:
+                logger.error("❌ Unknown plan_id in payment", 
+                            plan_id=plan_id,
+                            order_id=order_id,
+                            available_plans=list(settings.subscription_plans.keys()))
+                
+                return {
+                    'success': False,
+                    'error': f'Unknown plan_id: {plan_id}',
+                    'payment_data': payment_data
+                }
+            
+            # ✅ Проверяем сумму платежа
+            expected_amount = plan['price']
+            if abs(amount - expected_amount) > 0.01:  # Допускаем погрешность в 1 копейку
+                logger.error("❌ Payment amount mismatch",
+                            order_id=order_id,
+                            received_amount=amount,
+                            expected_amount=expected_amount,
+                            plan_id=plan_id)
+                
+                return {
+                    'success': False,
+                    'error': f'Amount mismatch: received {amount}, expected {expected_amount}',
+                    'payment_data': payment_data
+                }
+            
+            # ✅ Создаем подписку
+            subscription = await self.create_subscription(payment_data)
+            
+            if subscription:
+                logger.info("✅ Subscription created successfully",
+                           subscription_id=subscription.get('id'),
+                           user_id=user_id,
+                           plan_id=plan_id,
+                           plan_title=plan.get('title'),
+                           end_date=subscription.get('end_date'))
+                
+                # ✅ Логируем успешную операцию для мониторинга
+                await self._log_payment_success(payment_data, subscription)
+                
+                return {
+                    'success': True,
+                    'subscription': subscription,
+                    'payment_data': payment_data,
+                    'message': 'Subscription created successfully'
+                }
+            else:
+                logger.error("❌ Failed to create subscription",
+                            order_id=order_id,
+                            user_id=user_id,
+                            plan_id=plan_id)
+                
+                return {
+                    'success': False,
+                    'error': 'Failed to create subscription in database',
+                    'payment_data': payment_data
+                }
+            
+        except Exception as e:
+            logger.error("💥 Error processing successful payment",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        payment_data=payment_data,
+                        exc_info=True)
+            
+            return {
+                'success': False,
+                'error': f'Internal error: {str(e)}',
+                'payment_data': payment_data
+            }
+    
+    async def _log_payment_success(self, payment_data: dict, subscription: dict):
+        """
+        ✅ Логирование успешного платежа для мониторинга и аналитики
+        """
+        try:
+            log_data = {
+                'event': 'payment_success',
+                'order_id': payment_data.get('order_id'),
+                'user_id': payment_data.get('user_id'),
+                'plan_id': payment_data.get('plan_id'),
+                'amount': payment_data.get('amount'),
+                'currency': 'RUB',
+                'subscription_id': subscription.get('id'),
+                'payment_method': 'robokassa_web',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            logger.info("💰 Payment success logged", **log_data)
+            
+            # Здесь можно добавить отправку в аналитику, метрики и т.д.
+            
+        except Exception as e:
+            logger.error("❌ Failed to log payment success", error=str(e))
+    
     async def create_subscription(self, payment_data: dict) -> Optional[dict]:
         """
         Создание новой подписки после успешной оплаты
@@ -269,6 +405,140 @@ class SubscriptionManager:
                         user_id=user_id)
             return False
     
+    async def get_user_subscription_history(self, user_id: int) -> List[dict]:
+        """
+        Получение истории подписок пользователя
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            List[dict]: Список всех подписок пользователя
+        """
+        try:
+            history = await db.get_user_subscription_history(user_id)
+            
+            logger.info("Retrieved subscription history",
+                       user_id=user_id,
+                       subscriptions_count=len(history))
+            
+            return history
+            
+        except Exception as e:
+            logger.error("Failed to get subscription history",
+                        error=str(e),
+                        user_id=user_id)
+            return []
+    
+    async def get_expiring_subscriptions(self, days_threshold: int = 3) -> List[dict]:
+        """
+        Получение подписок которые истекают в ближайшие дни
+        
+        Args:
+            days_threshold: Количество дней до истечения
+            
+        Returns:
+            List[dict]: Список истекающих подписок
+        """
+        try:
+            threshold_date = datetime.now() + timedelta(days=days_threshold)
+            expiring = await db.get_expiring_subscriptions(threshold_date)
+            
+            logger.info("Retrieved expiring subscriptions",
+                       threshold_days=days_threshold,
+                       expiring_count=len(expiring))
+            
+            return expiring
+            
+        except Exception as e:
+            logger.error("Failed to get expiring subscriptions",
+                        error=str(e),
+                        days_threshold=days_threshold)
+            return []
+    
+    async def refresh_user_limits(self, user_id: int) -> bool:
+        """
+        Принудительное обновление лимитов пользователя на основе активной подписки
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            bool: True если лимиты обновлены успешно
+        """
+        try:
+            subscription = await self.get_active_subscription(user_id)
+            
+            if subscription:
+                await self._update_user_limits(
+                    user_id, 
+                    subscription['plan_id'], 
+                    subscription['end_date']
+                )
+                
+                logger.info("User limits refreshed to Pro",
+                           user_id=user_id,
+                           plan_id=subscription['plan_id'])
+                
+                return True
+            else:
+                await self._reset_user_limits(user_id)
+                
+                logger.info("User limits refreshed to Free",
+                           user_id=user_id)
+                
+                return True
+            
+        except Exception as e:
+            logger.error("Failed to refresh user limits",
+                        error=str(e),
+                        user_id=user_id)
+            return False
+    
+    async def validate_subscription_integrity(self) -> dict:
+        """
+        Проверка целостности данных подписок
+        
+        Returns:
+            dict: Результаты проверки
+        """
+        try:
+            # Получаем статистику
+            stats = await self.get_subscription_stats()
+            
+            # Проверяем активные подписки на истечение
+            active_subscriptions = await db.get_all_active_subscriptions()
+            expired_found = 0
+            
+            for subscription in active_subscriptions:
+                end_date = subscription.get('end_date')
+                if end_date and end_date <= datetime.now():
+                    # Подписка истекла, но статус еще активный
+                    await self._deactivate_subscription(
+                        subscription['id'], 
+                        'auto_expired_by_integrity_check'
+                    )
+                    await self._reset_user_limits(subscription['user_id'])
+                    expired_found += 1
+            
+            logger.info("Subscription integrity check completed",
+                       total_active=len(active_subscriptions),
+                       expired_found=expired_found)
+            
+            return {
+                'success': True,
+                'total_active_subscriptions': len(active_subscriptions),
+                'expired_subscriptions_fixed': expired_found,
+                'statistics': stats
+            }
+            
+        except Exception as e:
+            logger.error("Failed to validate subscription integrity", error=str(e))
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
     # Внутренние методы
     
     async def _update_user_limits(self, user_id: int, plan_id: str, end_date: datetime):
@@ -322,3 +592,19 @@ class SubscriptionManager:
 
 # Создаем глобальный экземпляр менеджера
 subscription_manager = SubscriptionManager()
+
+# Логируем успешную инициализацию
+logger.info("🎉 SubscriptionManager initialized successfully",
+           features=[
+               "process_successful_payment",
+               "create_subscription", 
+               "get_active_subscription",
+               "check_user_limits",
+               "get_subscription_stats",
+               "extend_subscription",
+               "cancel_subscription",
+               "get_user_subscription_history",
+               "get_expiring_subscriptions", 
+               "refresh_user_limits",
+               "validate_subscription_integrity"
+           ])
