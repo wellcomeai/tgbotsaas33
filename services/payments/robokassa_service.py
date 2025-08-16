@@ -1,7 +1,7 @@
 """
-Robokassa Payment Service - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
+Robokassa Payment Service - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ с МАКСИМАЛЬНЫМ ОТЛАДОЧНЫМ ЛОГИРОВАНИЕМ
 Сервис для создания платежных ссылок и обработки уведомлений от Robokassa
-Устранены ошибки structlog.DEBUG + добавлена защита от ошибок БД
+Устранены ошибки structlog.DEBUG + добавлена защита от ошибок БД + максимальная отладка
 """
 
 import hashlib
@@ -9,7 +9,7 @@ import logging
 import structlog
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 
 from config import settings
 
@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 
 
 class RobokassaService:
-    """Сервис для работы с Robokassa - ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок БД"""
+    """Сервис для работы с Robokassa - ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок БД и максимальной отладкой"""
     
     def __init__(self):
         self.merchant_login = settings.robokassa_merchant_login
@@ -31,7 +31,7 @@ class RobokassaService:
         # Проверяем что все параметры настроены
         self._validate_configuration()
         
-        logger.info("✅ RobokassaService initialized (FIXED VERSION)", 
+        logger.info("✅ RobokassaService initialized (FIXED VERSION WITH MAX DEBUG)", 
                    merchant=self.merchant_login,
                    test_mode=self.test_mode,
                    has_passwords=bool(self.password1 and self.password2))
@@ -100,160 +100,444 @@ class RobokassaService:
                         error=str(e),
                         error_type=type(e).__name__)
             return None
-    
-    def generate_payment_url(self, 
-                           plan_id: str, 
-                           user_id: int, 
-                           user_email: str = None,
-                           custom_description: str = None) -> Tuple[str, str]:
+
+    def generate_payment_url(self, plan_id: str, user_id: int, user_email: str = None, custom_description: str = None) -> Tuple[str, str]:
         """
-        Генерация ссылки для оплаты - ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок БД
+        ✅ МАКСИМАЛЬНО ОТЛАДОЧНАЯ версия генерации ссылки для оплаты
+        """
+        logger.info("🚀 ===== ROBOKASSA URL GENERATION START =====")
+        logger.info("📥 Input parameters",
+                   plan_id=plan_id,
+                   user_id=user_id,
+                   user_email=user_email,
+                   custom_description=custom_description)
         
-        Args:
-            plan_id: ID тарифного плана (1m, 3m, 6m, 12m)
-            user_id: ID пользователя Telegram
-            user_email: Email пользователя (опционально)
-            custom_description: Пользовательское описание (опционально)
-            
-        Returns:
-            Tuple[payment_url, order_id]: Ссылка для оплаты и ID заказа
-        """
         try:
-            # Валидация входных данных
+            # ✅ ВАЛИДАЦИЯ ВХОДНЫХ ДАННЫХ
+            logger.info("🔍 Step 1: Input validation...")
+            
             if not isinstance(user_id, int) or user_id <= 0:
-                raise ValueError(f"Invalid user_id: {user_id}. Must be positive integer.")
+                error_msg = f"Invalid user_id: {user_id}. Must be positive integer."
+                logger.error("❌ Validation failed", error=error_msg)
+                raise ValueError(error_msg)
                 
             if not isinstance(plan_id, str) or not plan_id.strip():
-                raise ValueError(f"Invalid plan_id: {plan_id}. Must be non-empty string.")
+                error_msg = f"Invalid plan_id: {plan_id}. Must be non-empty string."
+                logger.error("❌ Validation failed", error=error_msg)
+                raise ValueError(error_msg)
             
-            # Безопасное получение данных плана
+            logger.info("✅ Input validation passed")
+            
+            # ✅ ПОЛУЧЕНИЕ ПЛАНА
+            logger.info("🔍 Step 2: Getting plan data...")
+            
             plan = self._safe_get_plan(plan_id)
             if not plan:
                 available_plans = list(getattr(settings, 'subscription_plans', {}).keys())
-                raise ValueError(f"Unknown plan_id: {plan_id}. Available: {available_plans}")
+                error_msg = f"Unknown plan_id: {plan_id}. Available: {available_plans}"
+                logger.error("❌ Plan not found", error=error_msg, available_plans=available_plans)
+                raise ValueError(error_msg)
             
-            # Проверяем цену плана
+            logger.info("✅ Plan found",
+                       plan_id=plan_id,
+                       plan_title=plan.get('title'),
+                       plan_price=plan.get('price'),
+                       plan_duration=plan.get('duration_days'),
+                       plan_description=plan.get('description'))
+            
+            # ✅ ПРОВЕРКА ЦЕНЫ
+            logger.info("🔍 Step 3: Price validation...")
+            
             price = plan.get('price', 0)
+            logger.info("💰 Raw price data",
+                       price=price,
+                       price_type=type(price).__name__)
+            
             if not isinstance(price, (int, float)) or price <= 0:
-                raise ValueError(f"Invalid price in plan {plan_id}: {price}")
+                error_msg = f"Invalid price in plan {plan_id}: {price}"
+                logger.error("❌ Price validation failed", error=error_msg)
+                raise ValueError(error_msg)
             
-            # Генерируем уникальный ID заказа с временной меткой
+            # Форматируем цену с принудительной точкой
+            formatted_price = f"{float(price):.2f}".replace(',', '.')
+            logger.info("✅ Price formatted",
+                       original_price=price,
+                       formatted_price=formatted_price)
+            
+            # ✅ ГЕНЕРАЦИЯ ORDER_ID
+            logger.info("🔍 Step 4: Generating order ID...")
+            
             timestamp = int(datetime.now().timestamp())
-            order_id = f"botfactory_{user_id}_{plan_id}_{timestamp}"
+            # ✅ ИСПРАВЛЕНИЕ: Короткий order_id
+            order_id = f"bf{user_id}_{timestamp}"
             
-            # Описание платежа
-            description = custom_description or plan.get('description', f'Подписка {plan_id}')
+            logger.info("✅ Order ID generated",
+                       order_id=order_id,
+                       order_id_length=len(order_id),
+                       timestamp=timestamp)
             
-            # ✅ ИСПРАВЛЕНИЕ: Правильные основные параметры согласно документации
+            # ✅ ПОДГОТОВКА ОПИСАНИЯ
+            logger.info("🔍 Step 5: Preparing description...")
+            
+            # ✅ ИСПРАВЛЕНИЕ: Только ASCII символы
+            description = custom_description or f"Bot Factory {plan_id}"
+            logger.info("✅ Description prepared",
+                       description=description,
+                       description_length=len(description))
+            
+            # ✅ СОЗДАНИЕ БАЗОВЫХ ПАРАМЕТРОВ
+            logger.info("🔍 Step 6: Creating base parameters...")
+            
             params = {
                 'MerchantLogin': self.merchant_login,
-                'OutSum': f"{price:.2f}",  # Форматируем сумму с копейками
-                'InvId': order_id,  # ✅ КРИТИЧЕСКИ ВАЖНО: InvId обязателен
+                'OutSum': formatted_price,
+                'InvId': order_id,
                 'Description': description,
                 'Culture': 'ru',
                 'Encoding': 'utf-8'
             }
             
-            # Дополнительные параметры
+            logger.info("📋 Base parameters created",
+                       merchant_login=params['MerchantLogin'],
+                       out_sum=params['OutSum'],
+                       inv_id=params['InvId'],
+                       description_length=len(params['Description']))
+            
+            # ✅ ДОБАВЛЕНИЕ EMAIL
             if user_email and isinstance(user_email, str) and '@' in user_email:
                 params['Email'] = user_email
+                logger.info("📧 Email added", email_domain=user_email.split('@')[1] if '@' in user_email else None)
+            else:
+                logger.info("📧 No email provided or invalid")
             
-            # ✅ ИСПРАВЛЕНИЕ: Пользовательские параметры в правильном формате
-            # Все пользовательские параметры должны начинаться с Shp_
+            # ✅ ДОБАВЛЕНИЕ SHP ПАРАМЕТРОВ
+            logger.info("🔍 Step 7: Adding Shp parameters...")
+            
             params['Shp_user_id'] = str(user_id)
             params['Shp_plan_id'] = plan_id
-            params['Shp_bot_factory'] = '1'  # Маркер нашего проекта
+            params['Shp_bot_factory'] = '1'
             params['Shp_timestamp'] = str(timestamp)
             
-            # ✅ ИСПРАВЛЕНИЕ: Тестовый режим
+            logger.info("✅ Shp parameters added",
+                       shp_user_id=params['Shp_user_id'],
+                       shp_plan_id=params['Shp_plan_id'],
+                       shp_bot_factory=params['Shp_bot_factory'],
+                       shp_timestamp=params['Shp_timestamp'])
+            
+            # ✅ ТЕСТОВЫЙ РЕЖИМ
+            logger.info("🔍 Step 8: Checking test mode...")
+            
             if self.test_mode:
                 params['IsTest'] = '1'
-                logger.warning("🧪 ТЕСТОВЫЙ РЕЖИМ Robokassa активен!")
+                logger.warning("🧪 TEST MODE ENABLED - IsTest parameter added")
+            else:
+                logger.info("🏭 PRODUCTION MODE - No IsTest parameter")
             
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная генерация подписи
+            # ✅ ГЕНЕРАЦИЯ ПОДПИСИ
+            logger.info("🔍 Step 9: Generating signature...")
+            logger.info("🔐 Signature input data",
+                       merchant_login=self.merchant_login,
+                       out_sum=params['OutSum'],
+                       inv_id=params['InvId'],
+                       password1_length=len(self.password1) if self.password1 else 0,
+                       shp_params_count=len([k for k in params.keys() if k.startswith('Shp_')]))
+            
             signature = self._create_payment_signature_fixed(params)
             params['SignatureValue'] = signature
             
-            # Формируем полную ссылку
+            logger.info("✅ Signature generated",
+                       signature=signature,
+                       signature_length=len(signature))
+            
+            # ✅ СОЗДАНИЕ ИТОГОВОГО URL
+            logger.info("🔍 Step 10: Building final URL...")
+            
             payment_url = f"{self.payment_url}?{urlencode(params, encoding='utf-8')}"
             
-            logger.info("✅ Payment URL generated successfully (FIXED)",
+            logger.info("✅ URL created",
+                       base_url=self.payment_url,
+                       query_length=len(urlencode(params, encoding='utf-8')),
+                       total_url_length=len(payment_url))
+            
+            # ✅ ФИНАЛЬНАЯ ВАЛИДАЦИЯ URL
+            logger.info("🔍 Step 11: Final URL validation...")
+            
+            parsed = urlparse(payment_url)
+            
+            logger.info("🌐 URL structure",
+                       scheme=parsed.scheme,
+                       netloc=parsed.netloc,
+                       path=parsed.path,
+                       query_params_count=len(parsed.query.split('&')))
+            
+            # ✅ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ В URL
+            required_in_url = ['MerchantLogin', 'OutSum', 'InvId', 'SignatureValue']
+            for param in required_in_url:
+                if param not in payment_url:
+                    logger.error(f"❌ Missing {param} in final URL")
+                    raise ValueError(f"Missing required parameter {param} in URL")
+            
+            logger.info("✅ All required parameters present in URL")
+            
+            # ✅ ФИНАЛЬНОЕ ЛОГИРОВАНИЕ
+            logger.info("🎉 URL GENERATION SUCCESSFUL!",
                        order_id=order_id,
-                       user_id=user_id, 
+                       user_id=user_id,
                        plan_id=plan_id,
-                       amount=price,
+                       amount=formatted_price,
                        test_mode=self.test_mode,
-                       signature_length=len(signature),
-                       url_length=len(payment_url),
-                       description=description[:50] + "..." if len(description) > 50 else description)
+                       url_preview=payment_url[:100] + "..." if len(payment_url) > 100 else payment_url)
+            
+            logger.info("🚀 ===== ROBOKASSA URL GENERATION COMPLETE =====")
             
             return payment_url, order_id
             
         except Exception as e:
-            logger.error("❌ Failed to generate payment URL", 
+            logger.error("💥 ===== URL GENERATION FAILED =====",
                         error=str(e),
                         error_type=type(e).__name__,
                         plan_id=plan_id,
-                        user_id=user_id)
+                        user_id=user_id,
+                        exc_info=True)
+            
+            # Дополнительная диагностика
+            logger.error("🔍 Error context",
+                        merchant_login=getattr(self, 'merchant_login', None),
+                        password1_exists=bool(getattr(self, 'password1', None)),
+                        password2_exists=bool(getattr(self, 'password2', None)),
+                        test_mode=getattr(self, 'test_mode', None),
+                        payment_url=getattr(self, 'payment_url', None))
+            
             raise
-    
+
     def _create_payment_signature_fixed(self, params: dict) -> str:
         """
-        ✅ ИСПРАВЛЕННАЯ генерация подписи согласно документации Robokassa
-        
-        Формат подписи: MerchantLogin:OutSum:InvId:Password1:Shp_param1=value1:Shp_param2=value2
-        Пользовательские параметры должны быть отсортированы в алфавитном порядке ключей
+        ✅ МАКСИМАЛЬНО ОТЛАДОЧНАЯ генерация подписи
         """
+        logger.info("🔐 ===== SIGNATURE GENERATION START =====")
+        logger.info("📥 Input parameters count", params_count=len(params))
         
         try:
-            # Проверяем обязательные параметры
+            # ✅ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
+            logger.info("🔍 Step 1: Checking required parameters...")
+            
             required_params = ['MerchantLogin', 'OutSum', 'InvId']
             for param in required_params:
                 if param not in params:
-                    raise ValueError(f"Missing required parameter: {param}")
+                    error_msg = f"Missing required parameter: {param}"
+                    logger.error("❌ Missing parameter", param=param)
+                    raise ValueError(error_msg)
                 if not str(params[param]).strip():
-                    raise ValueError(f"Empty required parameter: {param}")
+                    error_msg = f"Empty required parameter: {param}"
+                    logger.error("❌ Empty parameter", param=param)
+                    raise ValueError(error_msg)
             
-            # ✅ ОСНОВНАЯ СТРОКА согласно документации Robokassa
+            logger.info("✅ Required parameters check passed")
+            
+            # ✅ СОЗДАНИЕ БАЗОВОЙ СТРОКИ
+            logger.info("🔍 Step 2: Creating base signature string...")
+            
             base_string = f"{params['MerchantLogin']}:{params['OutSum']}:{params['InvId']}:{self.password1}"
             
-            # ✅ Собираем пользовательские параметры в АЛФАВИТНОМ порядке
-            shp_params = []
-            for key in sorted(params.keys()):
-                if key.startswith('Shp_'):
-                    # ✅ ПРАВИЛЬНЫЙ формат: key=value
-                    shp_params.append(f"{key}={params[key]}")
+            logger.info("✅ Base string created",
+                       merchant_login=params['MerchantLogin'],
+                       out_sum=params['OutSum'],
+                       inv_id=params['InvId'],
+                       password1_length=len(self.password1))
             
-            # ✅ ПРАВИЛЬНОЕ объединение через двоеточие
+            # ✅ СБОР SHP ПАРАМЕТРОВ
+            logger.info("🔍 Step 3: Collecting Shp parameters...")
+            
+            shp_params = []
+            all_shp_keys = [key for key in params.keys() if key.startswith('Shp_')]
+            sorted_shp_keys = sorted(all_shp_keys)
+            
+            logger.info("📋 Shp parameters found",
+                       total_shp_params=len(all_shp_keys),
+                       shp_keys=sorted_shp_keys)
+            
+            for key in sorted_shp_keys:
+                shp_param = f"{key}={params[key]}"
+                shp_params.append(shp_param)
+                logger.info(f"➕ Added Shp parameter: {key}={params[key]}")
+            
+            logger.info("✅ Shp parameters collected",
+                       shp_params_count=len(shp_params),
+                       shp_params=shp_params)
+            
+            # ✅ СОЗДАНИЕ ИТОГОВОЙ СТРОКИ
+            logger.info("🔍 Step 4: Creating final signature string...")
+            
             if shp_params:
                 sign_string = base_string + ":" + ":".join(shp_params)
+                logger.info("✅ Final string with Shp parameters")
             else:
                 sign_string = base_string
+                logger.info("✅ Final string without Shp parameters")
             
-            # MD5 хеш в верхнем регистре (как требует Robokassa)
-            signature = hashlib.md5(sign_string.encode('utf-8')).hexdigest().upper()
+            # Маскированная версия для логирования
+            masked_string = sign_string.replace(self.password1, "[PASSWORD1_MASKED]")
+            logger.info("🔐 Signature string (masked)",
+                       masked_string=masked_string,
+                       total_length=len(sign_string))
             
-            logger.info("✅ Payment signature created (FIXED)", 
-                       order_id=params.get('InvId'),
-                       signature_base_length=len(sign_string),
-                       signature_length=len(signature),
-                       has_shp_params=len(shp_params) > 0,
-                       shp_params_count=len(shp_params))
+            # ✅ ГЕНЕРАЦИЯ MD5 ХЕША
+            logger.info("🔍 Step 5: Generating MD5 hash...")
             
-            # ✅ ИСПРАВЛЕНИЕ: Используем стандартное логирование вместо structlog.DEBUG
-            # Проверяем уровень логирования для отладки
-            debug_string = sign_string.replace(self.password1, "[PASSWORD1_MASKED]")
-            logger.debug("🔍 Signature string (password masked)", 
-                        debug_string=debug_string)
+            import hashlib
+            
+            # Кодируем в UTF-8
+            encoded_string = sign_string.encode('utf-8')
+            logger.info("📝 String encoded",
+                       encoding='utf-8',
+                       encoded_length=len(encoded_string))
+            
+            # Создаем MD5 хеш
+            md5_hash = hashlib.md5(encoded_string).hexdigest()
+            
+            # Приводим к верхнему регистру
+            signature = md5_hash.upper()
+            
+            logger.info("✅ MD5 signature generated",
+                       raw_md5=md5_hash,
+                       final_signature=signature,
+                       signature_length=len(signature))
+            
+            # ✅ ФИНАЛЬНАЯ ВАЛИДАЦИЯ
+            logger.info("🔍 Step 6: Final signature validation...")
+            
+            if not signature or len(signature) != 32:
+                error_msg = f"Invalid signature generated: {signature}"
+                logger.error("❌ Signature validation failed", 
+                            signature=signature,
+                            signature_length=len(signature) if signature else 0)
+                raise ValueError(error_msg)
+            
+            logger.info("✅ Signature validation passed")
+            
+            logger.info("🎉 SIGNATURE GENERATION SUCCESSFUL!",
+                       signature=signature,
+                       order_id=params.get('InvId'))
+            
+            logger.info("🔐 ===== SIGNATURE GENERATION COMPLETE =====")
             
             return signature
             
         except Exception as e:
-            logger.error("❌ Failed to create payment signature", 
+            logger.error("💥 ===== SIGNATURE GENERATION FAILED =====",
                         error=str(e),
                         error_type=type(e).__name__,
-                        order_id=params.get('InvId'))
+                        order_id=params.get('InvId') if isinstance(params, dict) else 'unknown',
+                        exc_info=True)
+            
+            # Диагностика ошибки
+            logger.error("🔍 Signature error context",
+                        params_type=type(params).__name__,
+                        params_keys=list(params.keys()) if isinstance(params, dict) else None,
+                        merchant_login=getattr(self, 'merchant_login', None),
+                        password1_exists=bool(getattr(self, 'password1', None)))
+            
             raise
+
+    def diagnose_payment_url(self, payment_url: str) -> dict:
+        """
+        ✅ ДИАГНОСТИКА СОЗДАННОЙ ССЫЛКИ
+        """
+        logger.info("🔍 ===== URL DIAGNOSIS START =====")
+        
+        try:
+            # Парсим URL
+            parsed = urlparse(payment_url)
+            params = parse_qs(parsed.query)
+            
+            diagnosis = {
+                'url_valid': bool(parsed.scheme and parsed.netloc),
+                'scheme': parsed.scheme,
+                'netloc': parsed.netloc,
+                'path': parsed.path,
+                'total_length': len(payment_url),
+                'query_length': len(parsed.query),
+                'params_count': len(params),
+                'required_params': {},
+                'shp_params': {},
+                'issues': []
+            }
+            
+            # Проверяем обязательные параметры
+            required = ['MerchantLogin', 'OutSum', 'InvId', 'SignatureValue']
+            for param in required:
+                if param in params:
+                    diagnosis['required_params'][param] = {
+                        'present': True,
+                        'value': params[param][0] if params[param] else None,
+                        'length': len(params[param][0]) if params[param] and params[param][0] else 0
+                    }
+                else:
+                    diagnosis['required_params'][param] = {'present': False}
+                    diagnosis['issues'].append(f"Missing required parameter: {param}")
+            
+            # Проверяем Shp параметры
+            for param_name, param_values in params.items():
+                if param_name.startswith('Shp_'):
+                    diagnosis['shp_params'][param_name] = {
+                        'value': param_values[0] if param_values else None,
+                        'length': len(param_values[0]) if param_values and param_values[0] else 0
+                    }
+            
+            # Проверки валидности
+            if diagnosis['total_length'] > 2000:
+                diagnosis['issues'].append("URL too long (>2000 chars)")
+            
+            if not diagnosis['url_valid']:
+                diagnosis['issues'].append("Invalid URL format")
+            
+            if parsed.netloc != 'auth.robokassa.ru':
+                diagnosis['issues'].append(f"Unexpected domain: {parsed.netloc}")
+            
+            logger.info("✅ URL diagnosis complete", diagnosis=diagnosis)
+            
+            return diagnosis
+            
+        except Exception as e:
+            logger.error("❌ URL diagnosis failed", error=str(e))
+            return {'error': str(e)}
+
+    def quick_test(self, plan_id: str = "1m", user_id: int = 123456) -> dict:
+        """
+        ✅ БЫСТРЫЙ ТЕСТ ВСЕЙ ЦЕПОЧКИ
+        """
+        logger.info("🧪 ===== QUICK TEST START =====")
+        
+        try:
+            # Тест генерации URL
+            url, order_id = self.generate_payment_url(plan_id, user_id)
+            
+            # Диагностика URL
+            diagnosis = self.diagnose_payment_url(url)
+            
+            # Health check
+            health = self.health_check()
+            
+            result = {
+                'success': True,
+                'url': url,
+                'order_id': order_id,
+                'diagnosis': diagnosis,
+                'health': health,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            logger.info("✅ Quick test PASSED", result=result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error("❌ Quick test FAILED", error=str(e))
+            return {
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
     
     def verify_webhook_signature(self, webhook_data: dict) -> bool:
         """
@@ -701,7 +985,7 @@ class RobokassaService:
             
             return {
                 'service_name': 'RobokassaService',
-                'version': 'FIXED_2.2_DB_PROTECTED',
+                'version': 'FIXED_3.0_MAX_DEBUG',
                 'merchant_login': self.merchant_login,
                 'test_mode': self.test_mode,
                 'has_password1': bool(self.password1),
@@ -711,14 +995,15 @@ class RobokassaService:
                 'available_plans': available_plans,
                 'plan_validation': plan_validation,
                 'initialized_at': datetime.now().isoformat(),
-                'db_protection_enabled': True
+                'db_protection_enabled': True,
+                'max_debug_enabled': True
             }
             
         except Exception as e:
             logger.error("❌ Error getting service info", error=str(e))
             return {
                 'service_name': 'RobokassaService',
-                'version': 'FIXED_2.2_DB_PROTECTED',
+                'version': 'FIXED_3.0_MAX_DEBUG',
                 'error': str(e),
                 'initialized_at': datetime.now().isoformat()
             }
@@ -796,7 +1081,7 @@ class RobokassaService:
 # ✅ Создаем глобальный экземпляр сервиса с дополнительной защитой
 try:
     robokassa_service = RobokassaService()
-    logger.info("🎉 RobokassaService (FIXED VERSION 2.2 with DB Protection) loaded successfully")
+    logger.info("🎉 RobokassaService (FIXED VERSION 3.0 with MAX DEBUG) loaded successfully")
     
     # Выполняем проверку здоровья при инициализации
     health_status = robokassa_service.health_check()
