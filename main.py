@@ -327,102 +327,349 @@ class BotFactory:
         
         logger.info("✅ Bot Factory with payment services shutdown completed")
     
-    # ✅ НОВЫЕ методы платежей (только если PAYMENTS_AVAILABLE)
+    # ✅ ОБНОВЛЕННЫЕ методы платежей с улучшенной логикой из paste.txt
     
     async def handle_robokassa_webhook(self, request):
-        """Обработка webhook от Robokassa (только если платежи доступны)"""
+        """
+        ✅ ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ обработка webhook от Robokassa
+        """
         if not PAYMENTS_AVAILABLE:
+            logger.warning("❌ Payments not available for webhook")
             return web.Response(text="Payments not available", status=503)
         
-        logger.info("📥 Received Robokassa webhook")
+        client_ip = request.remote or "unknown"
+        logger.info("📥 Received Robokassa webhook", client_ip=client_ip)
         
         try:
-            # Получаем данные из запроса
+            # Получаем данные из POST запроса
             form_data = await request.post()
             webhook_data = dict(form_data)
             
-            logger.info("🔍 Processing webhook data", order_id=webhook_data.get('InvId'))
+            order_id = webhook_data.get('InvId', 'unknown')
+            out_sum = webhook_data.get('OutSum', 'unknown')
             
-            # Проверяем подпись
+            logger.info("🔍 Processing webhook data", 
+                       order_id=order_id,
+                       out_sum=out_sum,
+                       data_keys=list(webhook_data.keys()),
+                       client_ip=client_ip)
+            
+            # ✅ КРИТИЧЕСКИ ВАЖНО: Проверяем подпись ПЕРВЫМ делом
             if not robokassa_service.verify_webhook_signature(webhook_data):
-                logger.error("❌ Invalid webhook signature")
-                return web.Response(text="Invalid signature", status=400)
+                logger.error("❌ Invalid webhook signature - SECURITY ALERT",
+                            order_id=order_id,
+                            client_ip=client_ip,
+                            received_signature=webhook_data.get('SignatureValue', '')[:10] + "...")
+                
+                # ✅ ВАЖНО: Robokassa ожидает статус 200 даже при ошибках
+                return web.Response(text="bad sign", status=200)
             
-            # Обрабатываем успешную оплату
-            result = await subscription_manager.process_successful_payment(webhook_data)
+            logger.info("✅ Webhook signature verified successfully", order_id=order_id)
+            
+            # ✅ Парсим и валидируем данные
+            parsed_data = robokassa_service.parse_webhook_data(webhook_data)
+            if not parsed_data:
+                logger.error("❌ Failed to parse webhook data",
+                            order_id=order_id,
+                            webhook_keys=list(webhook_data.keys()))
+                return web.Response(text="bad data", status=200)
+            
+            logger.info("✅ Webhook data parsed successfully",
+                       order_id=parsed_data['order_id'],
+                       user_id=parsed_data['user_id'],
+                       plan_id=parsed_data['plan_id'],
+                       amount=parsed_data['amount'])
+            
+            # ✅ Обрабатываем платеж через subscription_manager
+            result = await subscription_manager.process_successful_payment(parsed_data)
             
             if result.get('success'):
-                logger.info("✅ Payment processed successfully", order_id=webhook_data.get('InvId'))
+                logger.info("✅ Payment processed successfully", 
+                           order_id=order_id,
+                           user_id=parsed_data['user_id'],
+                           already_processed=result.get('already_processed', False))
                 
-                # Отправляем уведомление пользователю
+                # ✅ ОБЯЗАТЕЛЬНЫЙ ответ для Robokassa в правильном формате
+                response_text = f"OK{order_id}"
+                
+                # ✅ Отправляем уведомление пользователю (асинхронно, чтобы не блокировать ответ)
                 if result.get('payment_data') and result.get('subscription'):
-                    await self._notify_user_about_payment(
+                    asyncio.create_task(self._notify_user_about_payment(
                         result['payment_data'], 
                         result['subscription']
-                    )
+                    ))
                 
-                return web.Response(text="OK", status=200)
+                logger.info("📤 Sending OK response to Robokassa", 
+                           response=response_text,
+                           order_id=order_id)
+                
+                return web.Response(text=response_text, status=200)
+                
             else:
-                logger.error("❌ Failed to process payment", error=result.get('error'))
-                return web.Response(text="Processing failed", status=500)
+                error_msg = result.get('error', 'Unknown processing error')
+                logger.error("❌ Failed to process payment", 
+                            error=error_msg,
+                            order_id=order_id,
+                            user_id=parsed_data.get('user_id'))
+                
+                # ✅ Даже при ошибке обработки возвращаем 200, но с сообщением об ошибке
+                return web.Response(text=f"processing failed: {error_msg}", status=200)
             
         except Exception as e:
-            logger.error("💥 Error processing webhook", error=str(e), exc_info=True)
-            return web.Response(text="Internal error", status=500)
-    
+            logger.error("💥 Critical error processing webhook", 
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        client_ip=client_ip,
+                        order_id=webhook_data.get('InvId', 'unknown') if 'webhook_data' in locals() else 'unknown',
+                        exc_info=True)
+            
+            # ✅ КРИТИЧЕСКИ ВАЖНО: Всегда возвращаем статус 200 для Robokassa
+            return web.Response(text="internal error", status=200)
+
     async def payment_success_page(self, request):
-        """Страница успешной оплаты"""
+        """
+        ✅ УЛУЧШЕННАЯ страница успешной оплаты с проверкой подписи
+        """
         if not PAYMENTS_AVAILABLE:
             return web.Response(text="Payments not available", status=503)
+        
+        try:
+            # Получаем параметры из URL
+            query_params = dict(request.query)
             
-        return web.Response(text="""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Оплата прошла успешно!</title>
-            <meta charset="utf-8">
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .success { color: green; font-size: 24px; margin: 20px 0; }
-                .info { color: #666; font-size: 16px; }
-            </style>
-        </head>
-        <body>
-            <div class="success">✅ Оплата прошла успешно!</div>
-            <div class="info">
-                Подписка активирована автоматически.<br>
-                Вернитесь в Bot Factory и наслаждайтесь всеми возможностями!
-            </div>
-        </body>
-        </html>
-        """, content_type='text/html')
-    
+            order_id = query_params.get('InvId', 'unknown')
+            out_sum = query_params.get('OutSum', 'unknown')
+            
+            logger.info("📄 Success page accessed",
+                       order_id=order_id,
+                       out_sum=out_sum,
+                       user_agent=request.headers.get('User-Agent', 'unknown'))
+            
+            # ✅ НОВОЕ: Проверяем подпись Success URL (опционально)
+            signature_valid = robokassa_service.verify_success_url_signature(query_params)
+            
+            if signature_valid:
+                logger.info("✅ Success URL signature verified", order_id=order_id)
+                verification_status = "✅ Подтверждено"
+            else:
+                logger.warning("⚠️ Success URL signature verification failed", order_id=order_id)
+                verification_status = "⚠️ Не подтверждено"
+            
+            return web.Response(text=f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Оплата прошла успешно! - Bot Factory</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {{ 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        text-align: center; 
+                        padding: 50px;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        margin: 0;
+                        min-height: 100vh;
+                        display: flex;
+                        flex-direction: column;
+                        justify-content: center;
+                        align-items: center;
+                    }}
+                    .success-container {{
+                        background: rgba(255, 255, 255, 0.1);
+                        backdrop-filter: blur(10px);
+                        border-radius: 20px;
+                        padding: 40px;
+                        box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+                        border: 1px solid rgba(255, 255, 255, 0.18);
+                        max-width: 500px;
+                    }}
+                    .success {{ 
+                        color: #4CAF50; 
+                        font-size: 28px; 
+                        margin: 20px 0;
+                        font-weight: bold;
+                    }}
+                    .info {{ 
+                        font-size: 18px; 
+                        line-height: 1.6;
+                        margin: 20px 0;
+                    }}
+                    .order-info {{
+                        background: rgba(255, 255, 255, 0.1);
+                        padding: 15px;
+                        border-radius: 10px;
+                        margin: 20px 0;
+                        font-family: monospace;
+                        font-size: 14px;
+                    }}
+                    .verification {{
+                        font-size: 14px;
+                        margin-top: 10px;
+                        opacity: 0.8;
+                    }}
+                    .btn {{
+                        background: #4CAF50;
+                        color: white;
+                        padding: 12px 30px;
+                        border: none;
+                        border-radius: 25px;
+                        font-size: 16px;
+                        cursor: pointer;
+                        text-decoration: none;
+                        display: inline-block;
+                        margin-top: 20px;
+                        transition: all 0.3s ease;
+                    }}
+                    .btn:hover {{
+                        background: #45a049;
+                        transform: translateY(-2px);
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="success-container">
+                    <div class="success">🎉 Оплата прошла успешно!</div>
+                    <div class="info">
+                        Спасибо за покупку Bot Factory Pro!<br>
+                        Ваша подписка активирована автоматически.
+                    </div>
+                    <div class="order-info">
+                        Заказ: {order_id}<br>
+                        Сумма: {out_sum} ₽<br>
+                        Статус: {verification_status}
+                    </div>
+                    <div class="info">
+                        Возвращайтесь в Bot Factory и наслаждайтесь<br>
+                        всеми возможностями Pro версии!
+                    </div>
+                    <div class="verification">
+                        Если подписка не активировалась автоматически,<br>
+                        обратитесь в поддержку с номером заказа.
+                    </div>
+                    <a href="https://t.me/your_bot_username" class="btn">
+                        Вернуться в Bot Factory
+                    </a>
+                </div>
+            </body>
+            </html>
+            """, content_type='text/html')
+            
+        except Exception as e:
+            logger.error("❌ Error rendering success page", error=str(e))
+            return web.Response(text="Error loading success page", status=500)
+
     async def payment_fail_page(self, request):
-        """Страница неудачной оплаты"""
+        """
+        ✅ УЛУЧШЕННАЯ страница неудачной оплаты
+        """
         if not PAYMENTS_AVAILABLE:
             return web.Response(text="Payments not available", status=503)
+        
+        try:
+            query_params = dict(request.query)
+            order_id = query_params.get('InvId', 'unknown')
             
-        return web.Response(text="""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Ошибка оплаты</title>
-            <meta charset="utf-8">
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .error { color: red; font-size: 24px; margin: 20px 0; }
-                .info { color: #666; font-size: 16px; }
-            </style>
-        </head>
-        <body>
-            <div class="error">❌ Ошибка оплаты</div>
-            <div class="info">
-                Оплата не была завершена.<br>
-                Пожалуйста, попробуйте еще раз или обратитесь в поддержку.
-            </div>
-        </body>
-        </html>
-        """, content_type='text/html')
+            logger.warning("💸 Payment failed page accessed", 
+                          order_id=order_id,
+                          user_agent=request.headers.get('User-Agent', 'unknown'))
+            
+            return web.Response(text=f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ошибка оплаты - Bot Factory</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {{ 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        text-align: center; 
+                        padding: 50px;
+                        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+                        color: white;
+                        margin: 0;
+                        min-height: 100vh;
+                        display: flex;
+                        flex-direction: column;
+                        justify-content: center;
+                        align-items: center;
+                    }}
+                    .error-container {{
+                        background: rgba(255, 255, 255, 0.1);
+                        backdrop-filter: blur(10px);
+                        border-radius: 20px;
+                        padding: 40px;
+                        box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+                        border: 1px solid rgba(255, 255, 255, 0.18);
+                        max-width: 500px;
+                    }}
+                    .error {{ 
+                        color: #ff4757; 
+                        font-size: 28px; 
+                        margin: 20px 0;
+                        font-weight: bold;
+                    }}
+                    .info {{ 
+                        font-size: 18px; 
+                        line-height: 1.6;
+                        margin: 20px 0;
+                    }}
+                    .btn {{
+                        background: #ff4757;
+                        color: white;
+                        padding: 12px 30px;
+                        border: none;
+                        border-radius: 25px;
+                        font-size: 16px;
+                        cursor: pointer;
+                        text-decoration: none;
+                        display: inline-block;
+                        margin: 10px;
+                        transition: all 0.3s ease;
+                    }}
+                    .btn:hover {{
+                        background: #ff3742;
+                        transform: translateY(-2px);
+                    }}
+                    .btn-secondary {{
+                        background: #5f27cd;
+                    }}
+                    .btn-secondary:hover {{
+                        background: #341f97;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="error-container">
+                    <div class="error">❌ Ошибка оплаты</div>
+                    <div class="info">
+                        К сожалению, оплата не была завершена.<br>
+                        Возможные причины:
+                        <ul style="text-align: left; margin: 20px 0;">
+                            <li>Недостаточно средств на карте</li>
+                            <li>Отмена операции</li>
+                            <li>Технические проблемы банка</li>
+                        </ul>
+                    </div>
+                    <div style="font-size: 14px; opacity: 0.8; margin: 20px 0;">
+                        Заказ: {order_id}
+                    </div>
+                    <a href="https://t.me/your_bot_username" class="btn">
+                        Попробовать еще раз
+                    </a>
+                    <a href="https://t.me/your_support_username" class="btn btn-secondary">
+                        Связаться с поддержкой
+                    </a>
+                </div>
+            </body>
+            </html>
+            """, content_type='text/html')
+            
+        except Exception as e:
+            logger.error("❌ Error rendering fail page", error=str(e))
+            return web.Response(text="Error loading fail page", status=500)
     
     # ✅ ОБНОВЛЕННЫЙ метод _notify_user_about_payment
     async def _notify_user_about_payment(self, payment_data: dict, subscription: dict):
