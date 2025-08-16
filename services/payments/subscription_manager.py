@@ -62,7 +62,7 @@ class SubscriptionManager:
                 'start_date': start_date,
                 'end_date': end_date,
                 'status': 'active',
-                'metadata': {
+                'extra_data': {
                     'plan_details': plan,
                     'payment_data': payment_data
                 }
