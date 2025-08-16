@@ -612,3 +612,4 @@ class DatabaseManager:
 
 # Database instance for backwards compatibility
 db = DatabaseManager()
+database = db  # Алиас для совместимости с существующим кодом
