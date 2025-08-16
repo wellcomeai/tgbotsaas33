@@ -370,6 +370,8 @@ class DatabaseManager:
     @staticmethod
     async def get_subscription_stats():
         """Get subscription statistics"""
+        from sqlalchemy import text
+        
         try:
             query = """
                 SELECT 
@@ -387,13 +389,21 @@ class DatabaseManager:
                 row = result.fetchone()
                 
                 if row:
+                    # Правильное извлечение данных из Row объекта
+                    total = int(row.total or 0)
+                    active = int(row.active or 0)
+                    expired = int(row.expired or 0)
+                    cancelled = int(row.cancelled or 0)
+                    active_revenue = float(row.active_revenue or 0)
+                    total_revenue = float(row.total_revenue or 0)
+                    
                     return {
-                        'total': int(row[0] or 0),
-                        'active': int(row[1] or 0), 
-                        'expired': int(row[2] or 0),
-                        'cancelled': int(row[3] or 0),
-                        'revenue': float(row[5] or 0),
-                        'active_revenue': float(row[4] or 0)
+                        'total': total,
+                        'active': active,
+                        'expired': expired,
+                        'cancelled': cancelled,
+                        'active_revenue': active_revenue,
+                        'revenue': total_revenue
                     }
                 else:
                     return {
@@ -401,19 +411,19 @@ class DatabaseManager:
                         'active': 0,
                         'expired': 0,
                         'cancelled': 0,
-                        'revenue': 0.0,
-                        'active_revenue': 0.0
+                        'active_revenue': 0.0,
+                        'revenue': 0.0
                     }
                     
         except Exception as e:
-            logger.error("Failed to get subscription stats", error=str(e))
+            logger.error("Failed to get subscription stats", error=str(e), exc_info=True)
             return {
                 'total': 0,
                 'active': 0,
                 'expired': 0,
                 'cancelled': 0,
-                'revenue': 0.0,
-                'active_revenue': 0.0
+                'active_revenue': 0.0,
+                'revenue': 0.0
             }
 
     @staticmethod
