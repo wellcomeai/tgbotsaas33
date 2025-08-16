@@ -254,8 +254,20 @@ class DatabaseManager:
                 return result.scalar_one_or_none()
 
     @staticmethod
+    async def delete_user_bot(bot_id: str):
+        """Delete user bot"""
+        from database.models import UserBot
+        from sqlalchemy import delete
+        
+        async with get_db_session() as session:
+            await session.execute(
+                delete(UserBot).where(UserBot.bot_id == bot_id)
+            )
+            await session.commit()
+
+    @staticmethod
     async def create_payment_record(payment_data: dict):
-        """✅ КРИТИЧЕСКИ ИСПРАВЛЕННЫЙ: Create payment record"""
+        """✅ ИСПРАВЛЕННЫЙ: Create payment record с защитой от ошибок типов"""
         from database.models import Payment
         
         try:
@@ -264,16 +276,84 @@ class DatabaseManager:
                        order_id=payment_data.get('order_id'),
                        amount=payment_data.get('amount'))
             
-            async with get_db_session() as session:
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем ОБЪЕКТ Payment, а не список
-                # Убеждаемся что payment_data содержит правильные поля
-                required_fields = ['user_id', 'order_id', 'amount', 'status']
-                for field in required_fields:
-                    if field not in payment_data:
-                        raise ValueError(f"Missing required field: {field}")
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Валидация и очистка данных
+            clean_payment_data = {}
+            
+            # Обязательные поля
+            required_fields = {
+                'user_id': int,
+                'order_id': str, 
+                'amount': float,
+                'status': str
+            }
+            
+            for field, expected_type in required_fields.items():
+                if field not in payment_data:
+                    raise ValueError(f"Missing required field: {field}")
                 
-                # Создаем единичный объект Payment
-                payment = Payment(**payment_data)
+                value = payment_data[field]
+                if value is None:
+                    raise ValueError(f"Field {field} cannot be None")
+                
+                # Конвертируем в правильный тип
+                try:
+                    if expected_type == float:
+                        clean_payment_data[field] = float(value)
+                    elif expected_type == int:
+                        clean_payment_data[field] = int(value)
+                    elif expected_type == str:
+                        clean_payment_data[field] = str(value)
+                    else:
+                        clean_payment_data[field] = value
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"Invalid type for field {field}: {value} (expected {expected_type.__name__})")
+            
+            # Опциональные поля с дефолтными значениями
+            optional_fields = {
+                'currency': 'RUB',
+                'payment_method': 'robokassa_web',
+                'provider': 'robokassa',
+                'description': 'Bot Factory subscription',
+                'created_at': datetime.now(),
+                'updated_at': datetime.now()
+            }
+            
+            for field, default_value in optional_fields.items():
+                if field in payment_data and payment_data[field] is not None:
+                    # ✅ ИСПРАВЛЕНИЕ: Проверяем что это не список или словарь
+                    value = payment_data[field]
+                    if isinstance(value, (list, dict)):
+                        logger.warning(f"Field {field} is list/dict, using default", 
+                                     field=field, 
+                                     value_type=type(value).__name__)
+                        clean_payment_data[field] = default_value
+                    else:
+                        clean_payment_data[field] = value
+                else:
+                    clean_payment_data[field] = default_value
+            
+            # ✅ ИСПРАВЛЕНИЕ: Убираем все поля которые не относятся к модели Payment
+            valid_payment_fields = {
+                'user_id', 'subscription_id', 'order_id', 'amount', 'currency', 
+                'status', 'payment_method', 'provider', 'external_payment_id',
+                'external_transaction_id', 'robokassa_inv_id', 'robokassa_signature',
+                'raw_data', 'created_at', 'updated_at', 'processed_at', 
+                'webhook_data', 'description', 'user_email', 'user_ip'
+            }
+            
+            final_payment_data = {
+                key: value for key, value in clean_payment_data.items() 
+                if key in valid_payment_fields
+            }
+            
+            logger.info("💾 Cleaned payment data", 
+                       original_keys=list(payment_data.keys()),
+                       final_keys=list(final_payment_data.keys()),
+                       removed_keys=set(payment_data.keys()) - set(final_payment_data.keys()))
+            
+            async with get_db_session() as session:
+                # Создаем объект Payment с очищенными данными
+                payment = Payment(**final_payment_data)
                 session.add(payment)
                 await session.commit()
                 await session.refresh(payment)
@@ -285,7 +365,7 @@ class DatabaseManager:
                            amount=payment.amount,
                            status=payment.status)
                 
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь с данными объекта
+                # Возвращаем словарь с данными объекта
                 return {
                     'id': payment.id,
                     'user_id': payment.user_id,
@@ -295,12 +375,12 @@ class DatabaseManager:
                     'created_at': payment.created_at.isoformat() if payment.created_at else None,
                     'updated_at': payment.updated_at.isoformat() if payment.updated_at else None
                 }
-                
+                    
         except Exception as e:
             logger.error("❌ Failed to create payment record", 
                         error=str(e),
                         error_type=type(e).__name__,
-                        payment_data=payment_data,
+                        payment_data_keys=list(payment_data.keys()) if isinstance(payment_data, dict) else None,
                         exc_info=True)
             raise
 
@@ -333,34 +413,126 @@ class DatabaseManager:
 
     @staticmethod
     async def create_subscription(subscription_data: dict):
-        """Create new subscription"""
+        """✅ ИСПРАВЛЕННЫЙ: Create subscription с защитой от ошибок типов"""
         from database.models import Subscription
         
-        async with get_db_session() as session:
-            subscription = Subscription(**subscription_data)
-            session.add(subscription)
-            await session.commit()
-            await session.refresh(subscription)
+        try:
+            logger.info("📦 Creating subscription", 
+                       user_id=subscription_data.get('user_id'),
+                       plan_id=subscription_data.get('plan_id'),
+                       order_id=subscription_data.get('order_id'))
             
-            return {
-                'id': subscription.id,
-                'user_id': subscription.user_id,
-                'plan_id': subscription.plan_id,
-                'order_id': subscription.order_id,
-                'status': subscription.status,
-                'start_date': subscription.start_date,
-                'end_date': subscription.end_date,
-                'amount': subscription.amount
+            # ✅ ИСПРАВЛЕНИЕ: Валидация и очистка данных подписки
+            clean_data = {}
+            
+            # Обязательные поля с типами
+            required_fields = {
+                'user_id': int,
+                'plan_id': str,
+                'plan_name': str,
+                'amount': float,
+                'order_id': str,
+                'status': str
             }
+            
+            for field, expected_type in required_fields.items():
+                if field not in subscription_data:
+                    raise ValueError(f"Missing required field: {field}")
+                
+                value = subscription_data[field]
+                if value is None:
+                    raise ValueError(f"Field {field} cannot be None")
+                
+                # Конвертируем в правильный тип
+                try:
+                    if expected_type == float:
+                        clean_data[field] = float(value)
+                    elif expected_type == int:
+                        clean_data[field] = int(value)
+                    elif expected_type == str:
+                        clean_data[field] = str(value)
+                    else:
+                        clean_data[field] = value
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"Invalid type for field {field}: {value}")
+            
+            # Опциональные поля
+            optional_fields = {
+                'currency': 'RUB',
+                'payment_method': 'robokassa_web',
+                'start_date': datetime.now(),
+                'end_date': None,
+                'extra_data': None
+            }
+            
+            for field, default_value in optional_fields.items():
+                if field in subscription_data and subscription_data[field] is not None:
+                    value = subscription_data[field]
+                    # ✅ ИСПРАВЛЕНИЕ: Обработка дат
+                    if field in ['start_date', 'end_date'] and not isinstance(value, datetime):
+                        if isinstance(value, str):
+                            try:
+                                clean_data[field] = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                            except:
+                                clean_data[field] = default_value
+                        else:
+                            clean_data[field] = default_value
+                    # ✅ ИСПРАВЛЕНИЕ: Обработка JSON полей
+                    elif field == 'extra_data':
+                        if isinstance(value, dict):
+                            clean_data[field] = value
+                        else:
+                            clean_data[field] = default_value
+                    else:
+                        clean_data[field] = value
+                else:
+                    clean_data[field] = default_value
+            
+            async with get_db_session() as session:
+                subscription = Subscription(**clean_data)
+                session.add(subscription)
+                await session.commit()
+                await session.refresh(subscription)
+                
+                logger.info("✅ Subscription created successfully",
+                           subscription_id=subscription.id,
+                           user_id=subscription.user_id,
+                           plan_id=subscription.plan_id,
+                           order_id=subscription.order_id,
+                           amount=subscription.amount)
+                
+                return {
+                    'id': subscription.id,
+                    'user_id': subscription.user_id,
+                    'plan_id': subscription.plan_id,
+                    'plan_name': subscription.plan_name,
+                    'order_id': subscription.order_id,
+                    'status': subscription.status,
+                    'amount': float(subscription.amount) if subscription.amount else 0.0,
+                    'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
+                    'end_date': subscription.end_date.isoformat() if subscription.end_date else None
+                }
+                
+        except Exception as e:
+            logger.error("❌ Failed to create subscription",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        subscription_data_keys=list(subscription_data.keys()) if isinstance(subscription_data, dict) else None,
+                        exc_info=True)
+            return None
 
     @staticmethod
     async def get_active_subscription(user_id: int):
-        """✅ КРИТИЧЕСКИ ИСПРАВЛЕННЫЙ: Get active subscription for user"""
+        """✅ ИСПРАВЛЕННЫЙ: Get active subscription с защитой от ошибок"""
         from database.models import Subscription
         from sqlalchemy import select, and_
         
         try:
             logger.info("🔍 Getting active subscription", user_id=user_id)
+            
+            # ✅ ИСПРАВЛЕНИЕ: Валидация входного параметра
+            if not isinstance(user_id, int) or user_id <= 0:
+                raise ValueError(f"Invalid user_id: {user_id}. Must be positive integer.")
             
             async with get_db_session() as session:
                 result = await session.execute(
@@ -375,7 +547,7 @@ class DatabaseManager:
                 subscription = result.scalar_one_or_none()
                 
                 if subscription:
-                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем СЛОВАРЬ, а не объект
+                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем ПРОСТОЙ СЛОВАРЬ
                     subscription_dict = {
                         'id': subscription.id,
                         'user_id': subscription.user_id,
@@ -383,18 +555,48 @@ class DatabaseManager:
                         'plan_name': getattr(subscription, 'plan_name', None),
                         'order_id': subscription.order_id,
                         'status': subscription.status,
-                        'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
-                        'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
                         'amount': float(subscription.amount) if subscription.amount else 0.0,
-                        'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
-                        'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
+                        'currency': getattr(subscription, 'currency', 'RUB')
                     }
+                    
+                    # ✅ ИСПРАВЛЕНИЕ: Безопасная обработка дат
+                    try:
+                        if subscription.start_date:
+                            subscription_dict['start_date'] = subscription.start_date.isoformat()
+                        else:
+                            subscription_dict['start_date'] = None
+                            
+                        if subscription.end_date:
+                            subscription_dict['end_date'] = subscription.end_date.isoformat()
+                        else:
+                            subscription_dict['end_date'] = None
+                            
+                        if subscription.created_at:
+                            subscription_dict['created_at'] = subscription.created_at.isoformat()
+                        else:
+                            subscription_dict['created_at'] = None
+                            
+                        if subscription.updated_at:
+                            subscription_dict['updated_at'] = subscription.updated_at.isoformat()
+                        else:
+                            subscription_dict['updated_at'] = None
+                            
+                    except Exception as date_error:
+                        logger.warning("Date conversion error in subscription", 
+                                     error=str(date_error),
+                                     subscription_id=subscription.id)
+                        # Устанавливаем None для проблемных дат
+                        subscription_dict.update({
+                            'start_date': None,
+                            'end_date': None, 
+                            'created_at': None,
+                            'updated_at': None
+                        })
                     
                     logger.info("✅ Active subscription found", 
                                user_id=user_id,
                                subscription_id=subscription.id,
-                               plan_id=subscription.plan_id,
-                               end_date=subscription.end_date)
+                               plan_id=subscription.plan_id)
                     
                     return subscription_dict
                 
@@ -408,6 +610,66 @@ class DatabaseManager:
                         user_id=user_id,
                         exc_info=True)
             return None
+
+    @staticmethod
+    async def cleanup_database_inconsistencies():
+        """✅ НОВОЕ: Очистка проблемных данных в БД которые могут вызывать ошибки типов"""
+        try:
+            logger.info("🧹 Starting database cleanup...")
+            
+            async with get_db_session() as session:
+                # Проверяем Payment записи с проблемными типами
+                from database.models import Payment
+                from sqlalchemy import select
+                
+                result = await session.execute(select(Payment))
+                payments = result.scalars().all()
+                
+                fixed_count = 0
+                
+                for payment in payments:
+                    needs_fix = False
+                    
+                    # Проверяем amount
+                    if payment.amount is not None and not isinstance(payment.amount, (int, float)):
+                        try:
+                            payment.amount = float(payment.amount)
+                            needs_fix = True
+                        except (ValueError, TypeError):
+                            payment.amount = 0.0
+                            needs_fix = True
+                    
+                    # Проверяем user_id
+                    if payment.user_id is not None and not isinstance(payment.user_id, int):
+                        try:
+                            payment.user_id = int(payment.user_id)
+                            needs_fix = True
+                        except (ValueError, TypeError):
+                            logger.error("Cannot fix user_id for payment", payment_id=payment.id)
+                            continue
+                    
+                    # Проверяем строковые поля
+                    string_fields = ['order_id', 'status', 'currency', 'payment_method', 'provider']
+                    for field in string_fields:
+                        value = getattr(payment, field, None)
+                        if value is not None and not isinstance(value, str):
+                            setattr(payment, field, str(value))
+                            needs_fix = True
+                    
+                    if needs_fix:
+                        fixed_count += 1
+                
+                if fixed_count > 0:
+                    await session.commit()
+                    logger.info("✅ Database cleanup completed", fixed_payments=fixed_count)
+                else:
+                    logger.info("✅ Database is clean, no fixes needed")
+                
+                return True
+                
+        except Exception as e:
+            logger.error("❌ Database cleanup failed", error=str(e))
+            return False
 
     @staticmethod
     async def get_users_with_expiring_subscriptions(days_ahead: int):
@@ -824,6 +1086,34 @@ class DatabaseManager:
                         exc_info=True)
             
             return False, 0, 500000
+
+    @staticmethod
+    async def get_user_token_balance(user_id: int):
+        """Get user token balance"""
+        from database.models import User
+        from sqlalchemy import select
+        
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(User.tokens_used_total, User.tokens_limit_total)
+                    .where(User.id == user_id)
+                )
+                
+                data = result.first()
+                if not data:
+                    return None
+                
+                return {
+                    'total_used': int(data.tokens_used_total or 0),
+                    'limit': int(data.tokens_limit_total or 500000)
+                }
+                
+        except Exception as e:
+            logger.error("Failed to get user token balance", 
+                        error=str(e), 
+                        user_id=user_id)
+            return None
 
     # ===== AI METHODS =====
     
