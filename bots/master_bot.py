@@ -18,6 +18,8 @@ import structlog
 
 from config import settings, Emoji, Messages
 from database import db
+from services.payments.robokassa_service import robokassa_service
+from services.payments.subscription_manager import subscription_manager
 
 
 logger = structlog.get_logger()
@@ -35,10 +37,18 @@ class MasterBot:
         )
         self.dp = Dispatcher(storage=MemoryStorage())
         self.bot_manager = bot_manager
+        
+        # ✅ НОВОЕ: Инициализируем платежные сервисы
+        self.robokassa_service = robokassa_service
+        self.subscription_manager = subscription_manager
+        
         self._setup_handlers()
+        
+        logger.info("MasterBot initialized with payment integration",
+                   robokassa_test_mode=settings.robokassa_test_mode)
     
     def _setup_handlers(self):
-        """✅ ИСПРАВЛЕНО: Setup simplified handlers with proper deletion handler"""
+        """✅ ОБНОВЛЕНО: Setup handlers with payment callbacks"""
         # Basic commands
         self.dp.message.register(self.cmd_start, CommandStart())
         self.dp.message.register(self.cmd_help, Command("help"))
@@ -52,6 +62,12 @@ class MasterBot:
         
         # Pricing callbacks
         self.dp.callback_query.register(self.cb_pricing_plan, F.data.startswith("pricing_"))
+        
+        # ✅ НОВОЕ: Добавляем обработчики платежей
+        self.dp.callback_query.register(
+            self.cb_check_payment, 
+            F.data.startswith("check_payment_")
+        )
         
         # Bot management callbacks
         self.dp.callback_query.register(self.cb_bot_details, F.data.startswith("bot_"))
@@ -68,6 +84,8 @@ class MasterBot:
             self.handle_token_input, 
             BotCreationStates.waiting_for_token
         )
+        
+        logger.info("Payment handlers registered successfully")
     
     async def set_commands(self):
         """Set bot commands"""
@@ -198,7 +216,7 @@ class MasterBot:
     # ✅ BASIC COMMAND HANDLERS
     
     async def cmd_start(self, message: Message, state: FSMContext):
-        """✅ ОБНОВЛЕНО: Start command handler с инициализацией токенового лимита"""
+        """✅ ОБНОВЛЕНО: Start command с проверкой подписки"""
         await state.clear()
         
         # Save user to database WITH token limit initialization
@@ -231,8 +249,37 @@ class MasterBot:
             except Exception as fallback_error:
                 logger.error("💥 Fallback registration also failed", error=str(fallback_error))
         
+        # ✅ НОВОЕ: Проверяем и показываем статус подписки
+        try:
+            limits = await self.subscription_manager.check_user_limits(message.from_user.id)
+            
+            if limits.get('is_pro'):
+                # Пользователь имеет Pro подписку
+                subscription_info = f"""
+
+💎 <b>У вас активна Pro подписка!</b>
+📅 Действует до: {limits.get('subscription_end').strftime('%d.%m.%Y') if limits.get('subscription_end') else 'Неизвестно'}
+✅ Безлимитные возможности активированы
+"""
+            else:
+                # Бесплатный план
+                subscription_info = f"""
+
+📋 <b>Текущий план:</b> Бесплатный
+🤖 Лимит ботов: {limits.get('max_bots', 5)}
+👥 Лимит подписчиков: {limits.get('max_subscribers', 100)} на бота
+
+💎 Обновитесь до Pro для снятия лимитов!
+"""
+            
+            welcome_message = Messages.WELCOME + subscription_info
+            
+        except Exception as e:
+            logger.error("Failed to check subscription in start command", error=str(e))
+            welcome_message = Messages.WELCOME
+        
         await message.answer(
-            Messages.WELCOME,
+            welcome_message,
             reply_markup=self.get_main_keyboard()
         )
     
@@ -370,78 +417,341 @@ class MasterBot:
         )
     
     async def cb_pricing(self, callback: CallbackQuery):
-        """Pricing plans callback"""
+        """✅ ОБНОВЛЕНО: Pricing plans callback с проверкой подписки"""
         await callback.answer()
         
-        text = f"""
+        # Проверяем текущую подписку пользователя
+        current_subscription = await self.subscription_manager.get_active_subscription(
+            callback.from_user.id
+        )
+        
+        if current_subscription:
+            # У пользователя уже есть активная подписка
+            end_date = current_subscription.get('end_date')
+            plan_name = current_subscription.get('plan_name')
+            
+            text = f"""
+💎 <b>У вас уже есть активная подписка!</b>
+
+📦 <b>Текущий тариф:</b> {plan_name}
+📅 <b>Действует до:</b> {end_date.strftime('%d.%m.%Y') if end_date else 'Неизвестно'}
+
+✅ <b>Доступные Pro функции:</b>
+• Безлимитные боты
+• Безлимитные подписчики  
+• Расширенные воронки продаж
+• Приоритетная поддержка
+
+💡 <b>Подписка продлится автоматически при новой оплате</b>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💎 Продлить подписку",
+                        callback_data="pricing_extend"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=f"{Emoji.BACK} Главное меню",
+                        callback_data="back_to_main"
+                    )
+                ]
+            ])
+            
+        else:
+            # Обычное меню тарифов для пользователей без подписки
+            text = f"""
 💎 <b>ТАРИФ "AI ADMIN"</b>
 
-<b>Стоимость подписки:</b>
+🚀 <b>Что дает Pro подписка:</b>
+• Безлимитное количество ботов
+• Безлимитные подписчики для каждого бота
+• Расширенные воронки продаж (безлимит сообщений)
+• Приоритетная техподдержка
+• Все будущие обновления
+
+<b>💰 Стоимость подписки:</b>
 • 📅 <b>1 месяц</b> — 299 ₽
 • 📅 <b>3 месяца</b> — 749 ₽ <i>(экономия 150₽)</i>
-• 📅 <b>6 месяцев</b> — 1,499 ₽ <i>(экономия 295₽)</i>
+• 📅 <b>6 месяцев</b> — 1,499 ₽ <i>(экономия 295₽)</i>  
 • 📅 <b>12 месяцев</b> — 2,490 ₽ <i>(экономия 1,098₽)</i>
 
 {Emoji.INFO} При оплате вы соглашаетесь с <a href="https://graph.org/AI-Admin---POLZOVATELSKOE-SOGLASHENIE-08-15">пользовательским соглашением</a>.
 
 Выберите срок действия тарифа:
 """
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=self.get_pricing_keyboard(),
-            disable_web_page_preview=True
-        )
-    
-    async def cb_pricing_plan(self, callback: CallbackQuery):
-        """Individual pricing plan callback"""
-        await callback.answer()
-        
-        plan_data = {
-            "pricing_1m": {"period": "1 месяц", "price": "299 ₽", "savings": ""},
-            "pricing_3m": {"period": "3 месяца", "price": "749 ₽", "savings": " (экономия 150₽)"},
-            "pricing_6m": {"period": "6 месяцев", "price": "1,499 ₽", "savings": " (экономия 295₽)"},
-            "pricing_12m": {"period": "12 месяцев", "price": "2,490 ₽", "savings": " (экономия 1,098₽)"},
-        }
-        
-        plan = plan_data.get(callback.data)
-        if not plan:
-            await callback.answer("Неверный тариф", show_alert=True)
-            return
-        
-        text = f"""
-💎 <b>Тариф "AI ADMIN"</b>
-📅 <b>Период:</b> {plan['period']}
-💰 <b>Стоимость:</b> {plan['price']}{plan['savings']}
-
-{Emoji.INFO} При оплате вы соглашаетесь с <a href="https://graph.org/AI-Admin---POLZOVATELSKOE-SOGLASHENIE-08-15">пользовательским соглашением</a>.
-
-🚧 <b>Функция оплаты находится в разработке</b>
-Скоро здесь появится возможность оплаты!
-
-Вернитесь к выбору тарифа или в главное меню:
-"""
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"💎 Выбрать другой тариф",
-                    callback_data="pricing"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"{Emoji.BACK} Главное меню",
-                    callback_data="back_to_main"
-                )
-            ]
-        ])
+            
+            keyboard = self.get_pricing_keyboard()
         
         await callback.message.edit_text(
             text,
             reply_markup=keyboard,
             disable_web_page_preview=True
         )
+    
+    async def cb_pricing_plan(self, callback: CallbackQuery):
+        """✅ ОБНОВЛЕНО: Обработчик выбора тарифного плана с генерацией Robokassa ссылки"""
+        await callback.answer()
+        
+        # Если это продление подписки
+        if callback.data == "pricing_extend":
+            await self._show_extend_subscription_options(callback)
+            return
+        
+        plan_id = callback.data.replace("pricing_", "")
+        
+        # Проверяем валидность плана
+        plan = settings.subscription_plans.get(plan_id)
+        if not plan:
+            await callback.answer("❌ Неверный тарифный план", show_alert=True)
+            return
+        
+        try:
+            # Генерируем ссылку для оплаты через Robokassa
+            payment_url, order_id = self.robokassa_service.generate_payment_url(
+                plan_id=plan_id,
+                user_id=callback.from_user.id,
+                user_email=None  # Email опционален
+            )
+            
+            if not payment_url:
+                await callback.answer("❌ Ошибка создания платежа", show_alert=True)
+                return
+            
+            # Создаем предварительную запись о платеже
+            await db.create_payment_record({
+                'user_id': callback.from_user.id,
+                'order_id': order_id,
+                'amount': plan['price'],
+                'currency': 'RUB',
+                'status': 'pending',
+                'payment_method': 'robokassa_web',
+                'description': plan['description']
+            })
+            
+            text = f"""
+💳 <b>Оплата подписки</b>
+
+📦 <b>Тариф:</b> {plan['title']}
+💰 <b>Стоимость:</b> {plan['price']} ₽
+⏱ <b>Срок:</b> {plan['duration_days']} дней
+
+🔒 <b>Безопасная оплата через Robokassa</b>
+Принимаем карты всех банков
+
+🎯 <b>После оплаты получите:</b>
+• Мгновенную активацию Pro функций
+• Безлимитные возможности Bot Factory
+• Приоритетную поддержку
+
+💡 <b>Нажмите кнопку ниже для перехода к оплате</b>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💳 Оплатить",
+                        url=payment_url
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Проверить оплату",
+                        callback_data=f"check_payment_{order_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="💎 Выбрать другой тариф",
+                        callback_data="pricing"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=f"{Emoji.BACK} Главное меню",
+                        callback_data="back_to_main"
+                    )
+                ]
+            ])
+            
+            await callback.message.edit_text(text, reply_markup=keyboard)
+            
+            logger.info("Payment link generated",
+                       user_id=callback.from_user.id,
+                       plan_id=plan_id,
+                       order_id=order_id,
+                       amount=plan['price'])
+            
+        except Exception as e:
+            logger.error("Failed to generate payment link",
+                        error=str(e),
+                        user_id=callback.from_user.id,
+                        plan_id=plan_id)
+            
+            await callback.answer("❌ Произошла ошибка. Попробуйте позже.", show_alert=True)
+    
+    async def cb_check_payment(self, callback: CallbackQuery):
+        """✅ НОВЫЙ: Проверка статуса оплаты"""
+        await callback.answer()
+        
+        # Извлекаем order_id из callback_data
+        if not callback.data.startswith("check_payment_"):
+            return
+        
+        order_id = callback.data.replace("check_payment_", "")
+        
+        try:
+            # Проверяем подписку в БД
+            subscription = await db.get_subscription_by_order_id(order_id)
+            
+            if subscription and subscription.get('status') == 'active':
+                # Оплата прошла успешно
+                end_date = subscription.get('end_date')
+                plan_name = subscription.get('plan_name')
+                
+                text = f"""
+🎉 <b>Оплата успешно обработана!</b>
+
+💎 <b>Тариф:</b> {plan_name}
+📅 <b>Действует до:</b> {end_date.strftime('%d.%m.%Y') if end_date else 'Неизвестно'}
+
+✅ <b>Pro функции активированы:</b>
+• Безлимитные боты
+• Безлимитные подписчики
+• Расширенные воронки продаж
+• Приоритетная поддержка
+
+🚀 <b>Начните создавать ботов без ограничений!</b>
+"""
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"{Emoji.PLUS} Создать бота",
+                            callback_data="create_bot"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"{Emoji.LIST} Мои боты",
+                            callback_data="my_bots"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"{Emoji.BACK} Главное меню",
+                            callback_data="back_to_main"
+                        )
+                    ]
+                ])
+                
+                await callback.message.edit_text(text, reply_markup=keyboard)
+                
+            else:
+                # Оплата еще не обработана
+                text = f"""
+⏳ <b>Ожидание оплаты</b>
+
+💳 Ваш платеж еще обрабатывается.
+
+⏱ <b>Обычно это занимает:</b>
+• 1-3 минуты для карт
+• До 10 минут для других способов
+
+🔄 <b>Что делать:</b>
+• Подождите несколько минут
+• Нажмите "Проверить оплату" снова
+• Если долго не приходит - обратитесь в поддержку
+
+💡 Мы автоматически активируем Pro функции сразу после получения платежа.
+"""
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔄 Проверить снова",
+                            callback_data=f"check_payment_{order_id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="💬 Поддержка",
+                            url="https://t.me/support"  # Замените на вашу поддержку
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"{Emoji.BACK} Главное меню",
+                            callback_data="back_to_main"
+                        )
+                    ]
+                ])
+                
+                await callback.message.edit_text(text, reply_markup=keyboard)
+                
+        except Exception as e:
+            logger.error("Failed to check payment status",
+                        error=str(e),
+                        order_id=order_id,
+                        user_id=callback.from_user.id)
+            
+            await callback.answer("❌ Ошибка проверки платежа", show_alert=True)
+    
+    async def _show_extend_subscription_options(self, callback: CallbackQuery):
+        """✅ НОВЫЙ: Показать опции продления подписки"""
+        text = f"""
+💎 <b>Продление подписки AI ADMIN</b>
+
+💡 <b>При продлении:</b>
+• Новый период добавится к текущему
+• Скидки действуют как для новых клиентов
+• Не теряете оставшееся время
+
+<b>💰 Выберите период продления:</b>
+• 📅 <b>1 месяц</b> — 299 ₽
+• 📅 <b>3 месяца</b> — 749 ₽ <i>(экономия 150₽)</i>
+• 📅 <b>6 месяцев</b> — 1,499 ₽ <i>(экономия 295₽)</i>
+• 📅 <b>12 месяцев</b> — 2,490 ₽ <i>(экономия 1,098₽)</i>
+
+Выберите срок продления:
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 1 месяц — 299 ₽",
+                    callback_data="pricing_1m"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 3 месяца — 749 ₽ (экономия 150₽)",
+                    callback_data="pricing_3m"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 6 месяцев — 1,499 ₽ (экономия 295₽)",
+                    callback_data="pricing_6m"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 12 месяцев — 2,490 ₽ (экономия 1,098₽)",
+                    callback_data="pricing_12m"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{Emoji.BACK} Назад",
+                    callback_data="pricing"
+                )
+            ]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
     
     async def cb_how_to_create(self, callback: CallbackQuery):
         """How to create bot callback"""
@@ -946,7 +1256,7 @@ class MasterBot:
     async def start_polling(self):
         """Start bot polling"""
         await self.set_commands()
-        logger.info("✅ Master bot started with token limit initialization")
+        logger.info("✅ Master bot started with payment integration")
         await self.dp.start_polling(self.bot)
     
     async def stop(self):
@@ -956,3 +1266,7 @@ class MasterBot:
             logger.info("Master bot stopped")
         except Exception as e:
             logger.error("Error closing bot session", error=str(e))
+
+
+# В конце файла добавить логирование
+logger.info("🎉 MasterBot with Robokassa integration loaded successfully")
