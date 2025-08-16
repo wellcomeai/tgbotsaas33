@@ -3,6 +3,7 @@ import json
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import func, select
+from sqlalchemy import text
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional, List, Union, Tuple, Dict
 from datetime import datetime, timedelta
@@ -369,37 +370,50 @@ class DatabaseManager:
     @staticmethod
     async def get_subscription_stats():
         """Get subscription statistics"""
-        from database.models import Subscription
-        from sqlalchemy import select, func, case, and_
-        
-        async with get_db_session() as session:
-            # Базовая статистика
-            result = await session.execute(
-                select(
-                    func.count(Subscription.id).label('total'),
-                    func.count(case([(and_(
-                        Subscription.status == 'active',
-                        Subscription.end_date > datetime.now()
-                    ), 1)])).label('active'),
-                    func.count(case([(
-                        Subscription.status == 'expired', 1
-                    )])).label('expired'),
-                    func.sum(case([(and_(
-                        Subscription.status == 'active',
-                        Subscription.end_date > datetime.now()
-                    ), Subscription.amount)])).label('active_revenue'),
-                    func.sum(Subscription.amount).label('total_revenue')
-                )
-            )
+        try:
+            query = """
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE status = 'active' AND end_date > NOW()) as active,
+                    COUNT(*) FILTER (WHERE status = 'expired' OR end_date <= NOW()) as expired,
+                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled,
+                    SUM(amount) FILTER (WHERE status = 'active') as active_revenue,
+                    SUM(amount) as total_revenue
+                FROM subscriptions
+            """
             
-            stats = result.first()
-            
+            async with get_db_session() as session:
+                result = await session.execute(text(query))
+                row = result.fetchone()
+                
+                if row:
+                    return {
+                        'total': int(row[0] or 0),
+                        'active': int(row[1] or 0), 
+                        'expired': int(row[2] or 0),
+                        'cancelled': int(row[3] or 0),
+                        'revenue': float(row[5] or 0),
+                        'active_revenue': float(row[4] or 0)
+                    }
+                else:
+                    return {
+                        'total': 0,
+                        'active': 0,
+                        'expired': 0,
+                        'cancelled': 0,
+                        'revenue': 0.0,
+                        'active_revenue': 0.0
+                    }
+                    
+        except Exception as e:
+            logger.error("Failed to get subscription stats", error=str(e))
             return {
-                'total': stats.total or 0,
-                'active': stats.active or 0,
-                'expired': stats.expired or 0,
-                'revenue': float(stats.total_revenue or 0),
-                'active_revenue': float(stats.active_revenue or 0)
+                'total': 0,
+                'active': 0,
+                'expired': 0,
+                'cancelled': 0,
+                'revenue': 0.0,
+                'active_revenue': 0.0
             }
 
     @staticmethod
