@@ -45,6 +45,49 @@ class Settings(BaseSettings):
     ai_detection_retries: int = 3   # max retries for each platform
     supported_ai_platforms: list = ['chatforyou', 'protalk']
     
+    # ✅ НОВОЕ: Настройки Robokassa
+    robokassa_merchant_login: str = Field(..., env="ROBOKASSA_MERCHANT_LOGIN")
+    robokassa_password1: str = Field(..., env="ROBOKASSA_PASSWORD1")  # Для создания ссылок
+    robokassa_password2: str = Field(..., env="ROBOKASSA_PASSWORD2")  # Для webhook
+    robokassa_test_mode: bool = Field(default=True, env="ROBOKASSA_TEST_MODE")
+    
+    # Webhook настройки
+    webhook_base_url: str = Field(..., env="WEBHOOK_BASE_URL")  # https://yourdomain.com
+    webhook_secret: str = Field(default="", env="WEBHOOK_SECRET")  # Опциональный секрет
+    
+    # Тарифные планы
+    subscription_plans: dict = {
+        "1m": {
+            "title": "AI ADMIN - 1 месяц",
+            "price": 299.0,
+            "duration_days": 30,
+            "description": "Безлимитные боты и ИИ агенты на 1 месяц"
+        },
+        "3m": {
+            "title": "AI ADMIN - 3 месяца", 
+            "price": 749.0,
+            "duration_days": 90,
+            "description": "Безлимитные боты и ИИ агенты на 3 месяца (экономия 150₽)"
+        },
+        "6m": {
+            "title": "AI ADMIN - 6 месяцев",
+            "price": 1499.0, 
+            "duration_days": 180,
+            "description": "Безлимитные боты и ИИ агенты на 6 месяцев (экономия 295₽)"
+        },
+        "12m": {
+            "title": "AI ADMIN - 12 месяцев",
+            "price": 2490.0,
+            "duration_days": 365, 
+            "description": "Безлимитные боты и ИИ агенты на 12 месяцев (экономия 1,098₽)"
+        }
+    }
+    
+    # Pro лимиты
+    pro_max_bots: int = 999
+    pro_max_subscribers: int = 999999
+    pro_max_funnel_messages: int = 999
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
