@@ -40,7 +40,7 @@ class Subscription(Base):
     # Метаданные и временные метки
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON)  # Дополнительные данные в JSON
+    extra_data = Column(JSON, nullable=True)  # Дополнительные данные в JSON
     
     # Связи
     user = relationship("User", back_populates="subscriptions")
