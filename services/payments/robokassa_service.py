@@ -4,6 +4,7 @@ Robokassa Payment Service - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРС
 """
 
 import hashlib
+import logging
 import structlog
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List
@@ -171,11 +172,11 @@ class RobokassaService:
                        has_shp_params=len(shp_params) > 0,
                        shp_params_count=len(shp_params))
             
-            # ✅ DEBUG: Логируем строку подписи (маскируем пароль для безопасности)
-            if logger.isEnabledFor(structlog.DEBUG):
-                debug_string = sign_string.replace(self.password1, "[PASSWORD1_MASKED]")
-                logger.debug("🔍 Signature string (password masked)", 
-                            debug_string=debug_string)
+            # ✅ ИСПРАВЛЕНИЕ: Используем стандартное логирование вместо structlog.DEBUG
+            # Проверяем уровень логирования для отладки
+            debug_string = sign_string.replace(self.password1, "[PASSWORD1_MASKED]")
+            logger.debug("🔍 Signature string (password masked)", 
+                        debug_string=debug_string)
             
             return signature
             
@@ -240,15 +241,15 @@ class RobokassaService:
                        shp_count=len(shp_params))
             
             if not is_valid:
-                # ✅ DEBUG: Подробное логирование для отладки (маскируем пароль)
-                if logger.isEnabledFor(structlog.DEBUG):
-                    debug_string = sign_string.replace(self.password2, "[PASSWORD2_MASKED]")
-                    logger.warning("❌ Invalid webhook signature - DEBUGGING INFO",
-                                  debug_string=debug_string,
-                                  received_signature=received_signature[:10] + "...",
-                                  calculated_signature=calculated_signature[:10] + "...",
-                                  out_sum=out_sum,
-                                  inv_id=inv_id)
+                # ✅ ИСПРАВЛЕНИЕ: Используем стандартное логирование для отладки
+                # Подробное логирование для отладки (маскируем пароль)
+                debug_string = sign_string.replace(self.password2, "[PASSWORD2_MASKED]")
+                logger.warning("❌ Invalid webhook signature - DEBUGGING INFO",
+                              debug_string=debug_string,
+                              received_signature=received_signature[:10] + "...",
+                              calculated_signature=calculated_signature[:10] + "...",
+                              out_sum=out_sum,
+                              inv_id=inv_id)
             
             return is_valid
             
@@ -534,7 +535,7 @@ class RobokassaService:
         """
         return {
             'service_name': 'RobokassaService',
-            'version': 'FIXED_2.0',
+            'version': 'FIXED_2.1',
             'merchant_login': self.merchant_login,
             'test_mode': self.test_mode,
             'has_password1': bool(self.password1),
@@ -549,7 +550,7 @@ class RobokassaService:
 # ✅ Создаем глобальный экземпляр сервиса
 try:
     robokassa_service = RobokassaService()
-    logger.info("🎉 RobokassaService (FIXED VERSION 2.0) loaded successfully")
+    logger.info("🎉 RobokassaService (FIXED VERSION 2.1) loaded successfully")
 except Exception as e:
     logger.error("❌ Failed to initialize RobokassaService", error=str(e))
     robokassa_service = None
