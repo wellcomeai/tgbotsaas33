@@ -492,7 +492,7 @@ class MasterBot:
         )
     
     async def cb_pricing_plan(self, callback: CallbackQuery):
-        """✅ ОБНОВЛЕНО: Обработчик выбора тарифного плана с генерацией Robokassa ссылки"""
+        """✅ ИСПРАВЛЕННЫЙ: Handle pricing plan selection"""
         await callback.answer()
         
         # Если это продление подписки
@@ -520,16 +520,19 @@ class MasterBot:
                 await callback.answer("❌ Ошибка создания платежа", show_alert=True)
                 return
             
-            # Создаем предварительную запись о платеже
-            await db.create_payment_record({
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильные данные для Payment
+            payment_record_data = {
                 'user_id': callback.from_user.id,
                 'order_id': order_id,
-                'amount': plan['price'],
+                'amount': float(plan['price']),  # ✅ Убеждаемся что это float
                 'currency': 'RUB',
                 'status': 'pending',
                 'payment_method': 'robokassa_web',
                 'description': plan['description']
-            })
+            }
+            
+            # Создаем предварительную запись о платеже
+            await db.create_payment_record(payment_record_data)
             
             text = f"""
 💳 <b>Оплата подписки</b>
@@ -585,7 +588,7 @@ class MasterBot:
                        amount=plan['price'])
             
         except Exception as e:
-            logger.error("Failed to generate payment link",
+            logger.error("❌ Failed to generate payment link",
                         error=str(e),
                         user_id=callback.from_user.id,
                         plan_id=plan_id)
