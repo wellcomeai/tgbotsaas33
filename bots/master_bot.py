@@ -2,6 +2,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse, parse_qs
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -492,47 +493,194 @@ class MasterBot:
         )
     
     async def cb_pricing_plan(self, callback: CallbackQuery):
-        """✅ ИСПРАВЛЕННЫЙ: Handle pricing plan selection"""
+        """✅ ОБНОВЛЕННЫЙ с максимальным отладочным логированием"""
         await callback.answer()
+        
+        logger.info("🔥 ===== ROBOKASSA DEBUG START =====")
+        logger.info("📋 Callback data received", 
+                   callback_data=callback.data,
+                   user_id=callback.from_user.id,
+                   username=callback.from_user.username)
         
         # Если это продление подписки
         if callback.data == "pricing_extend":
+            logger.info("🔄 Extend subscription request")
             await self._show_extend_subscription_options(callback)
             return
         
         plan_id = callback.data.replace("pricing_", "")
+        logger.info("📦 Plan ID extracted", plan_id=plan_id)
         
         # Проверяем валидность плана
+        logger.info("🔍 Checking plan validity...")
+        if not hasattr(settings, 'subscription_plans'):
+            logger.error("❌ settings.subscription_plans NOT FOUND!")
+            await callback.answer("❌ Ошибка конфигурации планов", show_alert=True)
+            return
+        
         plan = settings.subscription_plans.get(plan_id)
         if not plan:
+            available_plans = list(settings.subscription_plans.keys())
+            logger.error("❌ Invalid plan_id", 
+                        plan_id=plan_id, 
+                        available_plans=available_plans)
             await callback.answer("❌ Неверный тарифный план", show_alert=True)
             return
         
+        logger.info("✅ Plan found", 
+                   plan_id=plan_id,
+                   plan_title=plan.get('title'),
+                   plan_price=plan.get('price'),
+                   plan_duration=plan.get('duration_days'))
+        
+        # Проверяем Robokassa сервис
+        logger.info("🔍 Checking Robokassa service...")
+        if not self.robokassa_service:
+            logger.error("❌ robokassa_service is None!")
+            await callback.answer("❌ Сервис платежей недоступен", show_alert=True)
+            return
+        
+        # Логируем конфигурацию Robokassa
+        logger.info("⚙️ Robokassa configuration",
+                   merchant_login=self.robokassa_service.merchant_login,
+                   test_mode=self.robokassa_service.test_mode,
+                   has_password1=bool(self.robokassa_service.password1),
+                   has_password2=bool(self.robokassa_service.password2),
+                   password1_length=len(self.robokassa_service.password1) if self.robokassa_service.password1 else 0,
+                   password2_length=len(self.robokassa_service.password2) if self.robokassa_service.password2 else 0)
+        
         try:
-            # Генерируем ссылку для оплаты через Robokassa
+            logger.info("💳 Starting payment URL generation...")
+            logger.info("📊 Input parameters",
+                       plan_id=plan_id,
+                       user_id=callback.from_user.id,
+                       user_email=None,
+                       plan_price=plan.get('price'))
+            
+            # ✅ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПЛАНА
+            price = plan.get('price', 0)
+            if not isinstance(price, (int, float)) or price <= 0:
+                logger.error("❌ Invalid plan price", 
+                            plan_id=plan_id, 
+                            price=price, 
+                            price_type=type(price).__name__)
+                await callback.answer("❌ Ошибка в цене плана", show_alert=True)
+                return
+            
+            logger.info("💰 Price validation passed", price=price, price_type=type(price).__name__)
+            
+            # ✅ ТЕСТИРУЕМ ГЕНЕРАЦИЮ ПОДПИСИ ОТДЕЛЬНО
+            try:
+                logger.info("🔐 Testing signature generation...")
+                test_result = self.robokassa_service.test_signature_generation({
+                    'MerchantLogin': self.robokassa_service.merchant_login,
+                    'OutSum': f"{price:.2f}".replace(',', '.'),
+                    'InvId': f'test_{int(datetime.now().timestamp())}',
+                    'Shp_user_id': str(callback.from_user.id),
+                    'Shp_plan_id': plan_id,
+                    'Shp_bot_factory': '1'
+                })
+                
+                if test_result.get('success'):
+                    logger.info("✅ Signature test PASSED", 
+                               signature=test_result.get('signature'),
+                               signature_length=test_result.get('signature_length'))
+                else:
+                    logger.error("❌ Signature test FAILED", 
+                                error=test_result.get('error'))
+                    await callback.answer("❌ Ошибка тестирования подписи", show_alert=True)
+                    return
+                    
+            except Exception as sig_error:
+                logger.error("💥 Signature test exception", 
+                            error=str(sig_error),
+                            error_type=type(sig_error).__name__)
+                await callback.answer("❌ Ошибка тестирования подписи", show_alert=True)
+                return
+            
+            # ✅ ОСНОВНАЯ ГЕНЕРАЦИЯ URL
+            logger.info("🚀 Generating actual payment URL...")
             payment_url, order_id = self.robokassa_service.generate_payment_url(
                 plan_id=plan_id,
                 user_id=callback.from_user.id,
                 user_email=None  # Email опционален
             )
             
-            if not payment_url:
-                await callback.answer("❌ Ошибка создания платежа", show_alert=True)
+            logger.info("✅ Payment URL generated successfully!",
+                       order_id=order_id,
+                       url_length=len(payment_url),
+                       url_preview=payment_url[:150] + "..." if len(payment_url) > 150 else payment_url)
+            
+            # ✅ АНАЛИЗИРУЕМ СОЗДАННУЮ ССЫЛКУ
+            parsed_url = urlparse(payment_url)
+            url_params = parse_qs(parsed_url.query)
+            
+            logger.info("🔍 URL Analysis",
+                       scheme=parsed_url.scheme,
+                       netloc=parsed_url.netloc,
+                       path=parsed_url.path,
+                       query_length=len(parsed_url.query),
+                       params_count=len(url_params))
+            
+            # Логируем ключевые параметры (БЕЗ паролей!)
+            safe_params = {}
+            for key, value in url_params.items():
+                if 'password' not in key.lower() and 'signature' not in key.lower():
+                    safe_params[key] = value[0] if isinstance(value, list) and value else value
+                else:
+                    safe_params[key] = f"[MASKED_{len(str(value))}]"
+            
+            logger.info("📋 URL Parameters", params=safe_params)
+            
+            # Проверяем обязательные параметры
+            required_params = ['MerchantLogin', 'OutSum', 'InvId', 'SignatureValue']
+            missing_params = []
+            for param in required_params:
+                if param not in url_params:
+                    missing_params.append(param)
+            
+            if missing_params:
+                logger.error("❌ Missing required parameters", missing=missing_params)
+                await callback.answer("❌ Ошибка параметров платежа", show_alert=True)
                 return
             
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильные данные для Payment
+            logger.info("✅ All required parameters present")
+            
+            # ✅ СОЗДАЕМ ЗАПИСЬ О ПЛАТЕЖЕ
+            logger.info("💾 Creating payment record...")
             payment_record_data = {
                 'user_id': callback.from_user.id,
                 'order_id': order_id,
-                'amount': float(plan['price']),  # ✅ Убеждаемся что это float
+                'amount': float(plan['price']),
                 'currency': 'RUB',
                 'status': 'pending',
                 'payment_method': 'robokassa_web',
                 'description': plan['description']
             }
             
-            # Создаем предварительную запись о платеже
-            await db.create_payment_record(payment_record_data)
+            logger.info("📝 Payment record data", payment_data=payment_record_data)
+            
+            try:
+                payment_record = await db.create_payment_record(payment_record_data)
+                
+                if payment_record:
+                    logger.info("✅ Payment record created", 
+                               payment_id=payment_record.get('id'),
+                               order_id=order_id)
+                else:
+                    logger.error("❌ Failed to create payment record")
+                    await callback.answer("❌ Ошибка создания записи платежа", show_alert=True)
+                    return
+                    
+            except Exception as db_error:
+                logger.error("💥 Database error creating payment record",
+                            error=str(db_error),
+                            error_type=type(db_error).__name__)
+                await callback.answer("❌ Ошибка базы данных", show_alert=True)
+                return
+            
+            # ✅ ФОРМИРУЕМ ОТВЕТНОЕ СООБЩЕНИЕ
+            logger.info("📝 Preparing response message...")
             
             text = f"""
 💳 <b>Оплата подписки</b>
@@ -579,21 +727,125 @@ class MasterBot:
                 ]
             ])
             
+            logger.info("📤 Sending response to user...")
+            
             await callback.message.edit_text(text, reply_markup=keyboard)
             
-            logger.info("Payment link generated",
+            logger.info("🎉 SUCCESS! Payment flow completed successfully",
                        user_id=callback.from_user.id,
                        plan_id=plan_id,
                        order_id=order_id,
-                       amount=plan['price'])
+                       amount=plan['price'],
+                       url_length=len(payment_url))
+            
+            logger.info("🔥 ===== ROBOKASSA DEBUG END =====")
             
         except Exception as e:
-            logger.error("❌ Failed to generate payment link",
+            logger.error("💥 CRITICAL ERROR in payment URL generation",
                         error=str(e),
+                        error_type=type(e).__name__,
                         user_id=callback.from_user.id,
-                        plan_id=plan_id)
+                        plan_id=plan_id,
+                        exc_info=True)
+            
+            # Дополнительная диагностика
+            logger.error("🔍 Error context",
+                        robokassa_service_exists=self.robokassa_service is not None,
+                        plan_exists=plan is not None,
+                        plan_price=plan.get('price') if plan else None)
             
             await callback.answer("❌ Произошла ошибка. Попробуйте позже.", show_alert=True)
+            
+            logger.info("🔥 ===== ROBOKASSA DEBUG END (WITH ERROR) =====")
+    
+    async def debug_robokassa_manually(self, user_id: int = 123456, plan_id: str = "1m"):
+        """
+        ✅ РУЧНАЯ ДИАГНОСТИКА ROBOKASSA
+        Вызовите этот метод в консоли для тестирования
+        """
+        logger.info("🧪 ===== MANUAL ROBOKASSA DEBUG =====")
+        
+        try:
+            # Проверка сервиса
+            if not self.robokassa_service:
+                logger.error("❌ robokassa_service is None")
+                return False
+            
+            # Проверка health check
+            health = self.robokassa_service.health_check()
+            logger.info("🏥 Health check result", health=health)
+            
+            # Проверка планов
+            plan_validation = self.robokassa_service.validate_plan_prices()
+            logger.info("📋 Plan validation", validation=plan_validation)
+            
+            # Тест генерации URL
+            logger.info("🚀 Testing URL generation...")
+            payment_url, order_id = self.robokassa_service.generate_payment_url(
+                plan_id=plan_id,
+                user_id=user_id
+            )
+            
+            logger.info("✅ Manual test SUCCESSFUL",
+                       order_id=order_id,
+                       url=payment_url[:200] + "...")
+            
+            # Сохраняем URL в файл для проверки
+            with open("/tmp/robokassa_test_url.txt", "w") as f:
+                f.write(f"Order ID: {order_id}\n")
+                f.write(f"URL: {payment_url}\n")
+            
+            logger.info("💾 URL saved to /tmp/robokassa_test_url.txt")
+            
+            return True
+            
+        except Exception as e:
+            logger.error("💥 Manual test FAILED",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        exc_info=True)
+            return False
+    
+    def check_robokassa_config(self):
+        """Быстрая проверка конфигурации Robokassa"""
+        logger.info("🔧 ===== ROBOKASSA CONFIG CHECK =====")
+        
+        # Проверка сервиса
+        logger.info("Service check",
+                   service_exists=self.robokassa_service is not None)
+        
+        if not self.robokassa_service:
+            logger.error("❌ Robokassa service not initialized")
+            return False
+        
+        # Проверка настроек
+        service_info = self.robokassa_service.get_service_info()
+        logger.info("🔍 Service info", info=service_info)
+        
+        # Проверка переменных окружения
+        import os
+        env_vars = {
+            'ROBOKASSA_MERCHANT_LOGIN': os.getenv('ROBOKASSA_MERCHANT_LOGIN'),
+            'ROBOKASSA_TEST_MODE': os.getenv('ROBOKASSA_TEST_MODE'),
+            'ROBOKASSA_PASSWORD1': bool(os.getenv('ROBOKASSA_PASSWORD1')),
+            'ROBOKASSA_PASSWORD2': bool(os.getenv('ROBOKASSA_PASSWORD2'))
+        }
+        logger.info("🌍 Environment variables", env_vars=env_vars)
+        
+        # Проверка планов
+        logger.info("📋 Subscription plans",
+                   plans_exist=hasattr(settings, 'subscription_plans'),
+                   plans_count=len(settings.subscription_plans) if hasattr(settings, 'subscription_plans') else 0)
+        
+        if hasattr(settings, 'subscription_plans'):
+            for plan_id, plan_data in settings.subscription_plans.items():
+                logger.info(f"📦 Plan {plan_id}",
+                           title=plan_data.get('title'),
+                           price=plan_data.get('price'),
+                           duration=plan_data.get('duration_days'))
+        
+        logger.info("🔧 ===== CONFIG CHECK COMPLETE =====")
+        return True
     
     async def cb_check_payment(self, callback: CallbackQuery):
         """✅ НОВЫЙ: Проверка статуса оплаты"""
