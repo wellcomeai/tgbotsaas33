@@ -433,7 +433,7 @@ class DB:
         query = """
             INSERT INTO subscriptions 
             (user_id, plan_id, plan_name, amount, currency, order_id, payment_method,
-             start_date, end_date, status, metadata)
+             start_date, end_date, status, extra_data)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
         """
@@ -451,7 +451,7 @@ class DB:
                 subscription_data.get('start_date'),
                 subscription_data.get('end_date'),
                 subscription_data.get('status', 'active'),
-                subscription_data.get('metadata')
+                subscription_data.get('extra_data')
             )
             
             return dict(row) if row else None
@@ -537,7 +537,7 @@ class DB:
             UPDATE subscriptions 
             SET status = $2, 
                 updated_at = NOW(),
-                metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                extra_data = COALESCE(extra_data, '{}'::jsonb) || $3::jsonb
             WHERE id = $1
         """
         
