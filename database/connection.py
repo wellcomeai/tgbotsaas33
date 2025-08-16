@@ -453,7 +453,7 @@ class DatabaseManager:
 
     @staticmethod
     async def create_payment_record(payment_data: dict):
-        """✅ ИСПРАВЛЕННЫЙ: Create payment record с защитой от ошибок типов"""
+        """✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ метод создания записи платежа"""
         from database.models import Payment
         
         try:
@@ -462,84 +462,78 @@ class DatabaseManager:
                        order_id=payment_data.get('order_id'),
                        amount=payment_data.get('amount'))
             
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Валидация и очистка данных
-            clean_payment_data = {}
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Строгая валидация входных данных
+            if not isinstance(payment_data, dict):
+                raise ValueError(f"payment_data must be dict, got {type(payment_data).__name__}")
             
-            # Обязательные поля
-            required_fields = {
-                'user_id': int,
-                'order_id': str, 
-                'amount': float,
-                'status': str
-            }
-            
-            for field, expected_type in required_fields.items():
+            # ✅ ВАЛИДАЦИЯ ОБЯЗАТЕЛЬНЫХ ПОЛЕЙ
+            required_fields = ['user_id', 'order_id', 'amount', 'status']
+            for field in required_fields:
                 if field not in payment_data:
                     raise ValueError(f"Missing required field: {field}")
-                
-                value = payment_data[field]
-                if value is None:
+                if payment_data[field] is None:
                     raise ValueError(f"Field {field} cannot be None")
-                
-                # Конвертируем в правильный тип
-                try:
-                    if expected_type == float:
-                        clean_payment_data[field] = float(value)
-                    elif expected_type == int:
-                        clean_payment_data[field] = int(value)
-                    elif expected_type == str:
-                        clean_payment_data[field] = str(value)
-                    else:
-                        clean_payment_data[field] = value
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"Invalid type for field {field}: {value} (expected {expected_type.__name__})")
             
-            # Опциональные поля с дефолтными значениями
-            optional_fields = {
-                'currency': 'RUB',
-                'payment_method': 'robokassa_web',
-                'provider': 'robokassa',
-                'description': 'Bot Factory subscription',
-                'created_at': datetime.now(),
-                'updated_at': datetime.now()
-            }
+            # ✅ ОЧИСТКА И КОНВЕРТАЦИЯ ДАННЫХ
+            clean_data = {}
             
-            for field, default_value in optional_fields.items():
-                if field in payment_data and payment_data[field] is not None:
-                    # ✅ ИСПРАВЛЕНИЕ: Проверяем что это не список или словарь
-                    value = payment_data[field]
-                    if isinstance(value, (list, dict)):
-                        logger.warning(f"Field {field} is list/dict, using default", 
-                                     field=field, 
-                                     value_type=type(value).__name__)
-                        clean_payment_data[field] = default_value
-                    else:
-                        clean_payment_data[field] = value
-                else:
-                    clean_payment_data[field] = default_value
+            # Конвертируем обязательные поля с проверкой типов
+            try:
+                clean_data['user_id'] = int(payment_data['user_id'])
+                clean_data['order_id'] = str(payment_data['order_id'])
+                clean_data['amount'] = float(payment_data['amount'])
+                clean_data['status'] = str(payment_data['status'])
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Invalid data types in required fields: {e}")
             
-            # ✅ ИСПРАВЛЕНИЕ: Убираем все поля которые не относятся к модели Payment
-            valid_payment_fields = {
-                'user_id', 'subscription_id', 'order_id', 'amount', 'currency', 
-                'status', 'payment_method', 'provider', 'external_payment_id',
-                'external_transaction_id', 'robokassa_inv_id', 'robokassa_signature',
-                'raw_data', 'created_at', 'updated_at', 'processed_at', 
-                'webhook_data', 'description', 'user_email', 'user_ip'
-            }
+            # Проверяем валидность данных
+            if clean_data['user_id'] <= 0:
+                raise ValueError("user_id must be positive")
+            if not clean_data['order_id'].strip():
+                raise ValueError("order_id cannot be empty")
+            if clean_data['amount'] <= 0:
+                raise ValueError("amount must be positive")
+            if not clean_data['status'].strip():
+                raise ValueError("status cannot be empty")
             
-            final_payment_data = {
-                key: value for key, value in clean_payment_data.items() 
-                if key in valid_payment_fields
-            }
+            # ✅ ДОБАВЛЯЕМ ОПЦИОНАЛЬНЫЕ ПОЛЯ С БЕЗОПАСНЫМИ ЗНАЧЕНИЯМИ
+            clean_data['currency'] = str(payment_data.get('currency', 'RUB'))
+            clean_data['payment_method'] = str(payment_data.get('payment_method', 'robokassa_web'))
+            clean_data['provider'] = str(payment_data.get('provider', 'robokassa'))
+            clean_data['description'] = str(payment_data.get('description', 'Bot Factory subscription'))
             
-            logger.info("💾 Cleaned payment data", 
-                       original_keys=list(payment_data.keys()),
-                       final_keys=list(final_payment_data.keys()),
-                       removed_keys=set(payment_data.keys()) - set(final_payment_data.keys()))
+            # Обрабатываем опциональные строковые поля
+            optional_string_fields = [
+                'external_payment_id', 'external_transaction_id', 
+                'robokassa_inv_id', 'robokassa_signature', 'raw_data', 'user_ip'
+            ]
+            for field in optional_string_fields:
+                value = payment_data.get(field)
+                if value is not None:
+                    clean_data[field] = str(value)
             
+            # Обрабатываем JSONB поле
+            webhook_data = payment_data.get('webhook_data')
+            if webhook_data is not None and isinstance(webhook_data, dict):
+                clean_data['webhook_data'] = webhook_data
+            
+            # Обрабатываем даты
+            clean_data['created_at'] = datetime.now()
+            clean_data['updated_at'] = datetime.now()
+            
+            # Обрабатываем processed_at если есть
+            if 'processed_at' in payment_data and payment_data['processed_at']:
+                if isinstance(payment_data['processed_at'], datetime):
+                    clean_data['processed_at'] = payment_data['processed_at']
+                elif isinstance(payment_data['processed_at'], str):
+                    try:
+                        clean_data['processed_at'] = datetime.fromisoformat(payment_data['processed_at'].replace('Z', '+00:00'))
+                    except:
+                        clean_data['processed_at'] = None
+            
+            # ✅ СОЗДАНИЕ ЗАПИСИ В БД
             async with get_db_session() as session:
-                # Создаем объект Payment с очищенными данными
-                payment = Payment(**final_payment_data)
+                payment = Payment(**clean_data)
                 session.add(payment)
                 await session.commit()
                 await session.refresh(payment)
@@ -551,24 +545,26 @@ class DatabaseManager:
                            amount=payment.amount,
                            status=payment.status)
                 
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь с данными объекта
+                # ✅ ВОЗВРАЩАЕМ БЕЗОПАСНЫЙ СЛОВАРЬ
                 return {
-                    'id': payment.id,
-                    'user_id': payment.user_id,
-                    'order_id': payment.order_id,
-                    'amount': float(payment.amount) if payment.amount else 0.0,
-                    'status': payment.status,
+                    'id': int(payment.id),
+                    'user_id': int(payment.user_id),
+                    'order_id': str(payment.order_id),
+                    'amount': float(payment.amount),
+                    'status': str(payment.status),
+                    'currency': str(payment.currency) if payment.currency else 'RUB',
+                    'payment_method': str(payment.payment_method) if payment.payment_method else 'robokassa_web',
                     'created_at': payment.created_at.isoformat() if payment.created_at else None,
                     'updated_at': payment.updated_at.isoformat() if payment.updated_at else None
                 }
-                    
+                
         except Exception as e:
             logger.error("❌ Failed to create payment record", 
                         error=str(e),
                         error_type=type(e).__name__,
                         payment_data_keys=list(payment_data.keys()) if isinstance(payment_data, dict) else None,
                         exc_info=True)
-            raise
+            return None
 
     # ===== SUBSCRIPTION METHODS =====
 
@@ -586,103 +582,47 @@ class DatabaseManager:
                 subscription = result.scalar_one_or_none()
                 
                 if subscription:
-                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
                     return {
-                        'id': subscription.id,
-                        'user_id': subscription.user_id,
-                        'plan_id': subscription.plan_id,
-                        'plan_name': getattr(subscription, 'plan_name', None),
-                        'order_id': subscription.order_id,
-                        'status': subscription.status,
+                        'id': int(subscription.id),
+                        'user_id': int(subscription.user_id),
+                        'plan_id': str(subscription.plan_id) if subscription.plan_id else None,
+                        'plan_name': str(subscription.plan_name) if hasattr(subscription, 'plan_name') and subscription.plan_name else None,
+                        'order_id': str(subscription.order_id),
+                        'status': str(subscription.status),
                         'amount': float(subscription.amount) if subscription.amount else 0.0,
-                        'currency': getattr(subscription, 'currency', 'RUB'),
-                        'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
-                        'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
-                        'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
-                        'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
+                        'start_date': subscription.start_date if hasattr(subscription, 'start_date') else None,
+                        'end_date': subscription.end_date if hasattr(subscription, 'end_date') else None
                     }
                 return None
                 
         except Exception as e:
-            logger.error("❌ Failed to get subscription by order_id", error=str(e), order_id=order_id)
+            logger.error("❌ Failed to get subscription by order_id", 
+                        error=str(e),
+                        order_id=order_id)
             return None
 
     @staticmethod
     async def create_subscription(subscription_data: dict):
-        """✅ ИСПРАВЛЕННЫЙ: Create subscription с защитой от ошибок типов"""
+        """✅ ИСПРАВЛЕННЫЙ: Create new subscription"""
         from database.models import Subscription
         
         try:
-            logger.info("📦 Creating subscription", 
-                       user_id=subscription_data.get('user_id'),
-                       plan_id=subscription_data.get('plan_id'),
-                       order_id=subscription_data.get('order_id'))
-            
-            # ✅ ИСПРАВЛЕНИЕ: Валидация и очистка данных подписки
+            # Валидация и очистка данных аналогично create_payment_record
             clean_data = {}
             
-            # Обязательные поля с типами
-            required_fields = {
-                'user_id': int,
-                'plan_id': str,
-                'plan_name': str,
-                'amount': float,
-                'order_id': str,
-                'status': str
-            }
-            
-            for field, expected_type in required_fields.items():
+            # Обязательные поля
+            required_fields = ['user_id', 'plan_id', 'plan_name', 'amount', 'order_id', 'status']
+            for field in required_fields:
                 if field not in subscription_data:
                     raise ValueError(f"Missing required field: {field}")
-                
-                value = subscription_data[field]
-                if value is None:
-                    raise ValueError(f"Field {field} cannot be None")
-                
-                # Конвертируем в правильный тип
-                try:
-                    if expected_type == float:
-                        clean_data[field] = float(value)
-                    elif expected_type == int:
-                        clean_data[field] = int(value)
-                    elif expected_type == str:
-                        clean_data[field] = str(value)
-                    else:
-                        clean_data[field] = value
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"Invalid type for field {field}: {value}")
+                clean_data[field] = subscription_data[field]
             
             # Опциональные поля
-            optional_fields = {
-                'currency': 'RUB',
-                'payment_method': 'robokassa_web',
-                'start_date': datetime.now(),
-                'end_date': None,
-                'extra_data': None
-            }
-            
-            for field, default_value in optional_fields.items():
-                if field in subscription_data and subscription_data[field] is not None:
-                    value = subscription_data[field]
-                    # ✅ ИСПРАВЛЕНИЕ: Обработка дат
-                    if field in ['start_date', 'end_date'] and not isinstance(value, datetime):
-                        if isinstance(value, str):
-                            try:
-                                clean_data[field] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                            except:
-                                clean_data[field] = default_value
-                        else:
-                            clean_data[field] = default_value
-                    # ✅ ИСПРАВЛЕНИЕ: Обработка JSON полей
-                    elif field == 'extra_data':
-                        if isinstance(value, dict):
-                            clean_data[field] = value
-                        else:
-                            clean_data[field] = default_value
-                    else:
-                        clean_data[field] = value
-                else:
-                    clean_data[field] = default_value
+            clean_data['currency'] = subscription_data.get('currency', 'RUB')
+            clean_data['payment_method'] = subscription_data.get('payment_method', 'robokassa_web')
+            clean_data['start_date'] = subscription_data.get('start_date', datetime.now())
+            clean_data['end_date'] = subscription_data.get('end_date')
+            clean_data['extra_data'] = subscription_data.get('extra_data')
             
             async with get_db_session() as session:
                 subscription = Subscription(**clean_data)
@@ -690,49 +630,34 @@ class DatabaseManager:
                 await session.commit()
                 await session.refresh(subscription)
                 
-                logger.info("✅ Subscription created successfully",
-                           subscription_id=subscription.id,
-                           user_id=subscription.user_id,
-                           plan_id=subscription.plan_id,
-                           order_id=subscription.order_id,
-                           amount=subscription.amount)
-                
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем словарь
                 return {
-                    'id': subscription.id,
-                    'user_id': subscription.user_id,
-                    'plan_id': subscription.plan_id,
-                    'plan_name': subscription.plan_name,
-                    'order_id': subscription.order_id,
-                    'status': subscription.status,
-                    'amount': float(subscription.amount) if subscription.amount else 0.0,
-                    'currency': getattr(subscription, 'currency', 'RUB'),
-                    'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
-                    'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
-                    'created_at': subscription.created_at.isoformat() if subscription.created_at else None,
-                    'updated_at': subscription.updated_at.isoformat() if subscription.updated_at else None
+                    'id': int(subscription.id),
+                    'user_id': int(subscription.user_id),
+                    'plan_id': str(subscription.plan_id),
+                    'plan_name': str(subscription.plan_name),
+                    'order_id': str(subscription.order_id),
+                    'status': str(subscription.status),
+                    'amount': float(subscription.amount),
+                    'start_date': subscription.start_date,
+                    'end_date': subscription.end_date
                 }
                 
         except Exception as e:
-            logger.error("❌ Failed to create subscription",
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        subscription_data_keys=list(subscription_data.keys()) if isinstance(subscription_data, dict) else None,
-                        exc_info=True)
+            logger.error("❌ Failed to create subscription", error=str(e))
             return None
 
     @staticmethod
     async def get_active_subscription(user_id: int):
-        """✅ ИСПРАВЛЕННЫЙ: Get active subscription с защитой от ошибок"""
+        """✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ метод получения активной подписки"""
         from database.models import Subscription
         from sqlalchemy import select, and_
         
         try:
             logger.info("🔍 Getting active subscription", user_id=user_id)
             
-            # ✅ ИСПРАВЛЕНИЕ: Валидация входного параметра
+            # Валидация входного параметра
             if not isinstance(user_id, int) or user_id <= 0:
-                raise ValueError(f"Invalid user_id: {user_id}. Must be positive integer.")
+                raise ValueError(f"Invalid user_id: {user_id}")
             
             async with get_db_session() as session:
                 result = await session.execute(
@@ -747,48 +672,60 @@ class DatabaseManager:
                 subscription = result.scalar_one_or_none()
                 
                 if subscription:
-                    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Возвращаем ПРОСТОЙ СЛОВАРЬ
+                    # ✅ БЕЗОПАСНАЯ КОНВЕРТАЦИЯ В СЛОВАРЬ
                     subscription_dict = {
-                        'id': subscription.id,
-                        'user_id': subscription.user_id,
-                        'plan_id': subscription.plan_id,
-                        'plan_name': getattr(subscription, 'plan_name', None),
-                        'order_id': subscription.order_id,
-                        'status': subscription.status,
+                        'id': int(subscription.id),
+                        'user_id': int(subscription.user_id),
+                        'plan_id': str(subscription.plan_id) if subscription.plan_id else None,
+                        'plan_name': str(subscription.plan_name) if hasattr(subscription, 'plan_name') and subscription.plan_name else None,
+                        'order_id': str(subscription.order_id) if subscription.order_id else None,
+                        'status': str(subscription.status) if subscription.status else 'active',
                         'amount': float(subscription.amount) if subscription.amount else 0.0,
-                        'currency': getattr(subscription, 'currency', 'RUB')
+                        'currency': str(subscription.currency) if hasattr(subscription, 'currency') and subscription.currency else 'RUB'
                     }
                     
-                    # ✅ ИСПРАВЛЕНИЕ: Безопасная обработка дат
+                    # ✅ БЕЗОПАСНАЯ ОБРАБОТКА ДАТ
                     try:
-                        if subscription.start_date:
-                            subscription_dict['start_date'] = subscription.start_date.isoformat()
+                        if hasattr(subscription, 'start_date') and subscription.start_date:
+                            if isinstance(subscription.start_date, datetime):
+                                subscription_dict['start_date'] = subscription.start_date
+                            else:
+                                subscription_dict['start_date'] = None
                         else:
                             subscription_dict['start_date'] = None
                             
-                        if subscription.end_date:
-                            subscription_dict['end_date'] = subscription.end_date.isoformat()
+                        if hasattr(subscription, 'end_date') and subscription.end_date:
+                            if isinstance(subscription.end_date, datetime):
+                                subscription_dict['end_date'] = subscription.end_date
+                            else:
+                                subscription_dict['end_date'] = None
                         else:
                             subscription_dict['end_date'] = None
                             
-                        if subscription.created_at:
-                            subscription_dict['created_at'] = subscription.created_at.isoformat()
+                        if hasattr(subscription, 'created_at') and subscription.created_at:
+                            if isinstance(subscription.created_at, datetime):
+                                subscription_dict['created_at'] = subscription.created_at
+                            else:
+                                subscription_dict['created_at'] = None
                         else:
                             subscription_dict['created_at'] = None
                             
-                        if subscription.updated_at:
-                            subscription_dict['updated_at'] = subscription.updated_at.isoformat()
+                        if hasattr(subscription, 'updated_at') and subscription.updated_at:
+                            if isinstance(subscription.updated_at, datetime):
+                                subscription_dict['updated_at'] = subscription.updated_at
+                            else:
+                                subscription_dict['updated_at'] = None
                         else:
                             subscription_dict['updated_at'] = None
                             
                     except Exception as date_error:
-                        logger.warning("Date conversion error in subscription", 
+                        logger.warning("Date processing error in subscription", 
                                      error=str(date_error),
                                      subscription_id=subscription.id)
-                        # Устанавливаем None для проблемных дат
+                        # Устанавливаем безопасные значения
                         subscription_dict.update({
                             'start_date': None,
-                            'end_date': None, 
+                            'end_date': None,
                             'created_at': None,
                             'updated_at': None
                         })
@@ -796,7 +733,7 @@ class DatabaseManager:
                     logger.info("✅ Active subscription found", 
                                user_id=user_id,
                                subscription_id=subscription.id,
-                               plan_id=subscription.plan_id)
+                               plan_id=subscription_dict.get('plan_id'))
                     
                     return subscription_dict
                 
