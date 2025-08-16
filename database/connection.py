@@ -80,6 +80,32 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 class DatabaseManager:
     """Database operations manager - WILL BE SPLIT INTO MODULES"""
     
+    # ===== UTILITY METHODS =====
+    
+    @staticmethod
+    async def fetch_all(query, *params):
+        """Execute query and fetch all results"""
+        from sqlalchemy import text
+        async with get_db_session() as session:
+            result = await session.execute(text(query), params if params else [])
+            return result.fetchall()
+
+    @staticmethod
+    async def fetch_one(query, *params):
+        """Execute query and fetch one result"""
+        from sqlalchemy import text
+        async with get_db_session() as session:
+            result = await session.execute(text(query), params if params else [])
+            return result.fetchone()
+
+    @staticmethod
+    async def execute(query, *params):
+        """Execute query without returning results"""
+        from sqlalchemy import text
+        async with get_db_session() as session:
+            await session.execute(text(query), params if params else [])
+            await session.commit()
+    
     # ===== USER METHODS =====
     
     @staticmethod
@@ -225,6 +251,211 @@ class DatabaseManager:
                     select(UserBot).where(UserBot.bot_id == bot_id)
                 )
                 return result.scalar_one_or_none()
+
+    # ===== SUBSCRIPTION METHODS =====
+
+    @staticmethod
+    async def get_subscription_by_order_id(order_id: str):
+        """Get subscription by order ID"""
+        from database.models import Subscription
+        from sqlalchemy import select
+        
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(Subscription).where(Subscription.order_id == order_id)
+            )
+            subscription = result.scalar_one_or_none()
+            
+            if subscription:
+                return {
+                    'id': subscription.id,
+                    'user_id': subscription.user_id,
+                    'plan_id': subscription.plan_id,
+                    'order_id': subscription.order_id,
+                    'status': subscription.status,
+                    'start_date': subscription.start_date,
+                    'end_date': subscription.end_date,
+                    'amount': subscription.amount
+                }
+            return None
+
+    @staticmethod
+    async def create_subscription(subscription_data: dict):
+        """Create new subscription"""
+        from database.models import Subscription
+        
+        async with get_db_session() as session:
+            subscription = Subscription(**subscription_data)
+            session.add(subscription)
+            await session.commit()
+            await session.refresh(subscription)
+            
+            return {
+                'id': subscription.id,
+                'user_id': subscription.user_id,
+                'plan_id': subscription.plan_id,
+                'order_id': subscription.order_id,
+                'status': subscription.status,
+                'start_date': subscription.start_date,
+                'end_date': subscription.end_date,
+                'amount': subscription.amount
+            }
+
+    @staticmethod
+    async def get_active_subscription(user_id: int):
+        """Get active subscription for user"""
+        from database.models import Subscription
+        from sqlalchemy import select, and_
+        
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(Subscription).where(
+                    and_(
+                        Subscription.user_id == user_id,
+                        Subscription.status == 'active',
+                        Subscription.end_date > datetime.now()
+                    )
+                ).order_by(Subscription.end_date.desc())
+            )
+            subscription = result.scalar_one_or_none()
+            
+            if subscription:
+                return {
+                    'id': subscription.id,
+                    'user_id': subscription.user_id,
+                    'plan_id': subscription.plan_id,
+                    'plan_name': subscription.plan_name,
+                    'order_id': subscription.order_id,
+                    'status': subscription.status,
+                    'start_date': subscription.start_date,
+                    'end_date': subscription.end_date,
+                    'amount': subscription.amount
+                }
+            return None
+
+    @staticmethod
+    async def get_users_with_expiring_subscriptions(days_ahead: int):
+        """Get subscriptions expiring in N days"""
+        from database.models import Subscription
+        from sqlalchemy import select, and_
+        
+        target_date = datetime.now() + timedelta(days=days_ahead)
+        next_day = target_date + timedelta(days=1)
+        
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(Subscription).where(
+                    and_(
+                        Subscription.status == 'active',
+                        Subscription.end_date >= target_date,
+                        Subscription.end_date < next_day
+                    )
+                )
+            )
+            subscriptions = result.scalars().all()
+            
+            return [
+                {
+                    'id': sub.id,
+                    'user_id': sub.user_id,
+                    'plan_id': sub.plan_id,
+                    'plan_name': sub.plan_name,
+                    'end_date': sub.end_date,
+                    'status': sub.status
+                }
+                for sub in subscriptions
+            ]
+
+    @staticmethod
+    async def get_subscription_stats():
+        """Get subscription statistics"""
+        from database.models import Subscription
+        from sqlalchemy import select, func, case, and_
+        
+        async with get_db_session() as session:
+            # Базовая статистика
+            result = await session.execute(
+                select(
+                    func.count(Subscription.id).label('total'),
+                    func.count(case([(and_(
+                        Subscription.status == 'active',
+                        Subscription.end_date > datetime.now()
+                    ), 1)])).label('active'),
+                    func.count(case([(
+                        Subscription.status == 'expired', 1
+                    )])).label('expired'),
+                    func.sum(case([(and_(
+                        Subscription.status == 'active',
+                        Subscription.end_date > datetime.now()
+                    ), Subscription.amount)])).label('active_revenue'),
+                    func.sum(Subscription.amount).label('total_revenue')
+                )
+            )
+            
+            stats = result.first()
+            
+            return {
+                'total': stats.total or 0,
+                'active': stats.active or 0,
+                'expired': stats.expired or 0,
+                'revenue': float(stats.total_revenue or 0),
+                'active_revenue': float(stats.active_revenue or 0)
+            }
+
+    @staticmethod
+    async def extend_subscription(subscription_id: int, new_end_date: datetime):
+        """Extend subscription end date"""
+        from database.models import Subscription
+        from sqlalchemy import update
+        
+        async with get_db_session() as session:
+            await session.execute(
+                update(Subscription)
+                .where(Subscription.id == subscription_id)
+                .values(
+                    end_date=new_end_date,
+                    updated_at=datetime.now()
+                )
+            )
+            await session.commit()
+
+    @staticmethod
+    async def update_subscription_status(subscription_id: int, status: str, reason: str = None):
+        """Update subscription status"""
+        from database.models import Subscription
+        from sqlalchemy import update
+        
+        update_data = {
+            'status': status,
+            'updated_at': datetime.now()
+        }
+        
+        if reason:
+            # Добавляем причину в extra_data
+            from sqlalchemy.dialects.postgresql import insert
+            # Это упрощенная версия, может потребоваться более сложная логика
+            
+        async with get_db_session() as session:
+            await session.execute(
+                update(Subscription)
+                .where(Subscription.id == subscription_id)
+                .values(**update_data)
+            )
+            await session.commit()
+
+    @staticmethod  
+    async def update_user_limits(user_id: int, limits: dict):
+        """Update user limits"""
+        from database.models import User
+        from sqlalchemy import update
+        
+        async with get_db_session() as session:
+            await session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(**limits, updated_at=datetime.now())
+            )
+            await session.commit()
 
     # ===== USER SUBSCRIPTION METHODS =====
     
