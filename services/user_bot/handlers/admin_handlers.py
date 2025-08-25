@@ -1,8 +1,13 @@
 """
 Обработчики команд администратора
+✅ ПОЛНАЯ ИНТЕГРАЦИЯ: Управление ИИ агентами в админ панели
+✅ СОХРАНЕНО: Вся существующая логика (статистика, настройки, подписки)
+✅ ДОБАВЛЕНО: Полноценное управление OpenAI агентами
+✅ АРХИТЕКТУРА: AdminHandler использует AIHandler методы через делегирование
 """
 
 import structlog
+from datetime import datetime
 from aiogram import Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
@@ -12,7 +17,7 @@ from aiogram.types import ReplyKeyboardRemove
 from config import Emoji
 from ..keyboards import AdminKeyboards
 from ..formatters import MessageFormatter
-from ..states import ChannelStates
+from ..states import ChannelStates, AISettingsStates
 
 logger = structlog.get_logger()
 
@@ -29,25 +34,54 @@ def register_admin_handlers(dp: Dispatcher, **kwargs):
         # Создаем экземпляр обработчика с полной конфигурацией
         handler = AdminHandler(db, bot_config, funnel_manager, user_bot)
         
-        # Регистрируем команды
+        # ===== ОСНОВНЫЕ АДМИНСКИЕ КОМАНДЫ =====
         dp.message.register(handler.cmd_start, CommandStart())
         
-        # Регистрируем callback-обработчики
+        # ===== НАВИГАЦИОННЫЕ CALLBACK =====
         dp.callback_query.register(handler.cb_admin_main, F.data == "admin_main")
         dp.callback_query.register(handler.cb_admin_settings, F.data == "admin_settings")
         dp.callback_query.register(handler.cb_admin_funnel, F.data == "admin_funnel")
         dp.callback_query.register(handler.cb_admin_stats, F.data == "admin_stats")
         dp.callback_query.register(handler.cb_admin_tokens, F.data == "admin_tokens")
         
-        # ✅ ДОБАВЛЕННАЯ СТРОКА:
+        # ===== ✅ НОВОЕ: ПОЛНОЕ УПРАВЛЕНИЕ ИИ АГЕНТАМИ =====
         dp.callback_query.register(handler.cb_admin_ai, F.data == "admin_ai")
+        dp.callback_query.register(handler.cb_ai_management, F.data == "ai_management")
+        dp.callback_query.register(handler.cb_create_openai_agent, F.data == "create_openai_agent")
+        dp.callback_query.register(handler.cb_configure_openai_agent, F.data == "configure_openai_agent")
+        dp.callback_query.register(handler.cb_test_openai_agent, F.data == "test_openai_agent")
+        dp.callback_query.register(handler.cb_delete_openai_agent, F.data == "delete_openai_agent")
+        dp.callback_query.register(handler.cb_confirm_delete_agent, F.data == "openai_confirm_delete")
+        dp.callback_query.register(handler.cb_edit_agent_name, F.data == "openai_edit_name")
+        dp.callback_query.register(handler.cb_edit_agent_prompt, F.data == "openai_edit_prompt")
+        dp.callback_query.register(handler.cb_ai_exit_conversation, F.data == "ai_exit_conversation")
         
-
+        # ===== ✅ НОВОЕ: FSM ОБРАБОТЧИКИ ДЛЯ ИИ =====
+        dp.message.register(
+            handler.handle_openai_name_input,
+            AISettingsStates.admin_waiting_for_openai_name
+        )
+        dp.message.register(
+            handler.handle_openai_role_input,
+            AISettingsStates.admin_waiting_for_openai_role
+        )
+        dp.message.register(
+            handler.handle_agent_name_edit,
+            AISettingsStates.admin_editing_agent_name
+        )
+        dp.message.register(
+            handler.handle_agent_prompt_edit,
+            AISettingsStates.admin_editing_agent_prompt
+        )
+        dp.message.register(
+            handler.handle_admin_ai_conversation,
+            AISettingsStates.admin_in_ai_conversation
+        )
         
-        # ✅ НОВОЕ: Обработчик массовых рассылок
+        # ===== МАССОВЫЕ РАССЫЛКИ =====
         dp.callback_query.register(handler.cb_mass_broadcast_main, F.data == "mass_broadcast_main")
         
-        # Настройки канала подписки
+        # ===== НАСТРОЙКИ ПОДПИСКИ =====
         dp.callback_query.register(handler.cb_subscription_settings, F.data == "admin_subscription")
         dp.callback_query.register(handler.cb_toggle_subscription, F.data == "toggle_subscription")
         dp.callback_query.register(handler.cb_set_subscription_channel, F.data == "set_subscription_channel")
@@ -62,19 +96,21 @@ def register_admin_handlers(dp: Dispatcher, **kwargs):
         # Debug handler
         dp.message.register(handler.debug_owner_message, F.text == "test")
         
-        logger.info("Admin handlers registered successfully", 
+        logger.info("✅ Admin handlers registered successfully with AI integration", 
                    bot_id=bot_config['bot_id'], 
-                   owner_id=bot_config['owner_user_id'])
+                   owner_id=bot_config['owner_user_id'],
+                   ai_handlers_count=9,
+                   total_handlers=20)
         
     except Exception as e:
-        logger.error("Failed to register admin handlers", 
+        logger.error("💥 Failed to register admin handlers", 
                     bot_id=kwargs.get('bot_config', {}).get('bot_id', 'unknown'),
                     error=str(e), exc_info=True)
         raise
 
 
 class AdminHandler:
-    """Класс обработчиков администратора"""
+    """Класс обработчиков администратора с полной интеграцией ИИ"""
     
     def __init__(self, db, bot_config: dict, funnel_manager, user_bot):
         self.db = db
@@ -88,6 +124,44 @@ class AdminHandler:
         
         # Кэшируем только статичные данные
         self.stats = bot_config.get('stats', {})
+        
+        # ✅ НОВОЕ: Инициализация AI helper
+        self._ai_handler = None
+    
+    async def _get_ai_handler(self):
+        """Ленивая инициализация AI handler"""
+        if self._ai_handler is None:
+            try:
+                from .ai_handlers import AIHandler
+                self._ai_handler = AIHandler(
+                    db=self.db,
+                    bot_config=self.bot_config,
+                    user_bot=self.user_bot
+                )
+                logger.debug("✅ AI handler initialized", bot_id=self.bot_id)
+            except Exception as e:
+                logger.error("💥 Failed to initialize AI handler", error=str(e))
+                return None
+        return self._ai_handler
+    
+    async def _create_openai_handler(self):
+        """Создание экземпляра OpenAIHandler"""
+        try:
+            from .ai_openai_handler import OpenAIHandler
+            
+            openai_handler = OpenAIHandler(
+                db=self.db,
+                bot_config=self.bot_config,
+                ai_assistant=None,
+                user_bot=self.user_bot
+            )
+            
+            logger.debug("✅ OpenAIHandler created for admin", bot_id=self.bot_id)
+            return openai_handler
+            
+        except Exception as e:
+            logger.error("💥 Failed to create OpenAIHandler", error=str(e))
+            return None
     
     async def _safe_edit_message(self, callback: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
         """Безопасное редактирование сообщения с проверкой типа"""
@@ -154,6 +228,15 @@ class AdminHandler:
         except Exception as e:
             logger.error("❌ Error loading fresh config", bot_id=self.bot_id, error=str(e))
             return self.bot_config
+    
+    async def _get_fresh_ai_config(self) -> dict:
+        """Получение свежей конфигурации ИИ агента"""
+        try:
+            ai_config = await self.db.get_ai_config(self.bot_id)
+            return ai_config or {}
+        except Exception as e:
+            logger.error("💥 Failed to get fresh AI config", error=str(e))
+            return {}
     
     def _format_number(self, number: int) -> str:
         """Форматирование чисел с пробелами (22 500)"""
@@ -360,6 +443,36 @@ class AdminHandler:
         else:
             return "⚠️ Неизвестный тип", "unknown"
     
+    async def _get_ai_agent_info_fresh(self) -> tuple[str, str, dict]:
+        """✅ НОВОЕ: Получение СВЕЖЕЙ информации об ИИ агенте"""
+        try:
+            fresh_ai_config = await self._get_fresh_ai_config()
+            
+            if not fresh_ai_config or not fresh_ai_config.get('enabled') or not fresh_ai_config.get('agent_id'):
+                return "❌ Не создан", "none", {}
+            
+            agent_type = fresh_ai_config.get('type', 'unknown')
+            agent_settings = fresh_ai_config.get('settings', {})
+            
+            if agent_type == 'openai':
+                agent_name = agent_settings.get('agent_name', 'OpenAI агент')
+                creation_method = agent_settings.get('creation_method', 'unknown')
+                
+                if creation_method == 'real_openai_api':
+                    status = f"✅ {agent_name} (OpenAI)"
+                elif creation_method == 'fallback_stub':
+                    status = f"⚠️ {agent_name} (тестовый)"
+                else:
+                    status = f"✅ {agent_name} (OpenAI)"
+                
+                return status, "openai", fresh_ai_config
+            else:
+                return f"⚠️ {agent_type}", agent_type, fresh_ai_config
+                
+        except Exception as e:
+            logger.error("💥 Failed to get fresh AI agent info", error=str(e))
+            return "❌ Ошибка загрузки", "error", {}
+    
     async def _get_admin_welcome_text(self) -> str:
         """✅ ОБНОВЛЕНО: Генерация приветственного текста с fresh data и статистикой рассылок"""
         config = await self._get_fresh_config()
@@ -430,6 +543,8 @@ class AdminHandler:
 """
         
         return base_text
+    
+    # ===== ОСНОВНЫЕ АДМИНСКИЕ ОБРАБОТЧИКИ =====
     
     async def cmd_start(self, message: Message, state: FSMContext):
         """Команда /start с динамическими данными"""
@@ -552,36 +667,572 @@ class AdminHandler:
         from .funnel_handlers import show_funnel_main_menu
         await show_funnel_main_menu(callback, self.bot_id, self.bot_username, self.funnel_manager)
     
+    # ===== ✅ НОВОЕ: ПОЛНОЕ УПРАВЛЕНИЕ ИИ АГЕНТАМИ =====
+    
     async def cb_admin_ai(self, callback: CallbackQuery):
-        """✅ УПРОЩЕНО: Управление ИИ агентом"""
+        """✅ ОБНОВЛЕНО: Главное меню управления ИИ агентом"""
         await callback.answer()
         
         if not self._is_owner(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен", show_alert=True)
             return
         
-        # ✅ УПРОЩЕНО: Переносим в ai_handlers всю логику
-        text = """🤖 <b>ИИ Агент</b>
+        # Получаем свежую информацию об агенте
+        ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+        token_stats = await self._get_token_stats()
+        
+        text = f"""
+🤖 <b>Управление ИИ Агентом</b>
 
-Управление ИИ агентом перенесено в специальный раздел.
+<b>Текущий статус:</b> {ai_status}
 
 <b>Доступные действия:</b>
-- Создание агента
-- Настройка агента  
-- Тестирование агента
-- Управление токенами
-
-<b>Перейти к управлению ИИ?</b>"""
+"""
         
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 Управление ИИ", callback_data="ai_management")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main")]
-        ])
+        # Формируем клавиатуру в зависимости от статуса агента
+        keyboard_buttons = []
+        
+        if ai_type == "none":
+            # Агента нет - показываем создание
+            text += """
+• Создать нового OpenAI агента
+• Настроить параметры агента
+• Настроить ограничения доступа
+
+<b>Начать настройку ИИ агента?</b>"""
+            
+            keyboard_buttons = [
+                [InlineKeyboardButton(text="➕ Создать OpenAI агента", callback_data="create_openai_agent")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main")]
+            ]
+        else:
+            # Агент есть - показываем управление
+            agent_settings = ai_config.get('settings', {})
+            agent_name = agent_settings.get('agent_name', 'ИИ Агент')
+            
+            text += f"""
+• Настроить параметры агента
+• Протестировать работу агента
+• Изменить роль и инструкции
+• Удалить агента
+
+<b>Агент:</b> {agent_name}"""
+            
+            # Добавляем информацию о лимитах если есть
+            daily_limit = agent_settings.get('daily_limit')
+            if daily_limit:
+                text += f"\n<b>Лимит сообщений:</b> {daily_limit} в день"
+            
+            # Информация о токенах для OpenAI агентов
+            if ai_type == "openai" and token_stats['has_openai_bots']:
+                used_formatted = self._format_number(token_stats['total_used'])
+                limit_formatted = self._format_number(token_stats['limit'])
+                percentage = self._format_percentage(token_stats['total_used'], token_stats['limit'])
+                text += f"\n<b>Токены:</b> {used_formatted} / {limit_formatted} ({percentage})"
+            
+            keyboard_buttons = [
+                [InlineKeyboardButton(text="🧪 Протестировать агента", callback_data="test_openai_agent")],
+                [InlineKeyboardButton(text="⚙️ Настроить агента", callback_data="configure_openai_agent")],
+                [InlineKeyboardButton(text="🗑️ Удалить агента", callback_data="delete_openai_agent")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main")]
+            ]
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         await self._safe_edit_message(callback, text, reply_markup=keyboard)
-
+        
+        logger.info("✅ AI management menu displayed", 
+                   bot_id=self.bot_id,
+                   ai_type=ai_type,
+                   ai_status=ai_status)
     
-    # ✅ НОВОЕ: Обработчик массовых рассылок
+    async def cb_ai_management(self, callback: CallbackQuery):
+        """Альтернативный вход в управление ИИ (совместимость)"""
+        await self.cb_admin_ai(callback)
+    
+    async def cb_create_openai_agent(self, callback: CallbackQuery, state: FSMContext):
+        """Создание нового OpenAI агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            # Проверяем что агента еще нет
+            ai_config = await self._get_fresh_ai_config()
+            if ai_config and ai_config.get('enabled'):
+                await callback.answer("❌ ИИ агент уже существует. Удалите старого для создания нового.", show_alert=True)
+                return
+            
+            await state.set_state(AISettingsStates.admin_waiting_for_openai_name)
+            
+            text = """
+➕ <b>Создание OpenAI агента</b>
+
+<b>Шаг 1 из 2:</b> Введите имя для вашего ИИ агента
+
+<b>Примеры имен:</b>
+• Консультант по продажам
+• Помощник по SEO
+• Эксперт по недвижимости
+• Бизнес-аналитик
+• Техподдержка
+
+<b>Введите имя агента:</b>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="admin_ai")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ OpenAI agent creation started", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error starting OpenAI agent creation", error=str(e))
+            await callback.answer("❌ Ошибка при запуске создания агента", show_alert=True)
+    
+    async def cb_configure_openai_agent(self, callback: CallbackQuery):
+        """Настройка существующего OpenAI агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+            
+            if ai_type == "none":
+                await callback.answer("❌ Сначала создайте ИИ агента", show_alert=True)
+                return
+            
+            agent_settings = ai_config.get('settings', {})
+            agent_name = agent_settings.get('agent_name', 'ИИ Агент')
+            agent_prompt = agent_settings.get('system_prompt', 'Не настроен')
+            daily_limit = agent_settings.get('daily_limit', 'Без ограничений')
+            
+            # Ограничиваем длину промпта для отображения
+            prompt_preview = agent_prompt[:100] + "..." if len(agent_prompt) > 100 else agent_prompt
+            
+            text = f"""
+⚙️ <b>Настройка ИИ агента</b>
+
+<b>Текущие параметры:</b>
+
+<b>Имя:</b> {agent_name}
+<b>Роль:</b> {prompt_preview}
+<b>Лимит сообщений:</b> {daily_limit if daily_limit != 'Без ограничений' else 'Нет ограничений'}
+
+<b>Что можно изменить:</b>
+"""
+            
+            keyboard_buttons = [
+                [InlineKeyboardButton(text="✏️ Изменить имя", callback_data="openai_edit_name")],
+                [InlineKeyboardButton(text="🎭 Изменить роль", callback_data="openai_edit_prompt")],
+                [InlineKeyboardButton(text="📊 Настроить лимиты", callback_data="openai_set_limits")],
+                [InlineKeyboardButton(text="🔙 Назад к ИИ", callback_data="admin_ai")]
+            ]
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ AI agent configuration menu displayed", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error showing AI configuration", error=str(e))
+            await callback.answer("❌ Ошибка при загрузке настроек агента", show_alert=True)
+    
+    async def cb_test_openai_agent(self, callback: CallbackQuery, state: FSMContext):
+        """Тестирование OpenAI агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+            
+            if ai_type == "none":
+                await callback.answer("❌ Сначала создайте ИИ агента", show_alert=True)
+                return
+            
+            # Проверяем токены для OpenAI агентов
+            if ai_type == "openai":
+                token_stats = await self._get_token_stats()
+                if token_stats['remaining'] <= 0:
+                    await callback.answer("❌ Закончились токены OpenAI", show_alert=True)
+                    return
+            
+            await state.set_state(AISettingsStates.admin_in_ai_conversation)
+            await state.update_data(
+                agent_type=ai_type,
+                agent_id=ai_config.get('agent_id'),
+                is_admin_test=True
+            )
+            
+            agent_settings = ai_config.get('settings', {})
+            agent_name = agent_settings.get('agent_name', 'ИИ Агент')
+            
+            text = f"""
+🧪 <b>Тестирование {agent_name}</b>
+
+Вы находитесь в режиме тестирования ИИ агента. 
+
+<b>Возможности:</b>
+• Задавать любые вопросы агенту
+• Проверять качество ответов
+• Тестировать понимание инструкций
+
+<b>Напишите ваш тестовый вопрос:</b>
+
+<i>Для выхода используйте кнопку ниже или команды /exit, /stop</i>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚪 Завершить тестирование", callback_data="ai_exit_conversation")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ AI agent testing started", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error starting AI testing", error=str(e))
+            await callback.answer("❌ Ошибка при запуске тестирования", show_alert=True)
+    
+    async def cb_delete_openai_agent(self, callback: CallbackQuery):
+        """Подтверждение удаления OpenAI агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+            
+            if ai_type == "none":
+                await callback.answer("❌ ИИ агент не найден", show_alert=True)
+                return
+            
+            agent_settings = ai_config.get('settings', {})
+            agent_name = agent_settings.get('agent_name', 'ИИ Агент')
+            
+            text = f"""
+🗑️ <b>Удаление ИИ агента</b>
+
+<b>Вы уверены что хотите удалить агента?</b>
+
+<b>Агент:</b> {agent_name}
+<b>Тип:</b> {ai_type.upper()}
+
+<b>⚠️ ВНИМАНИЕ:</b>
+• Все настройки агента будут потеряны
+• Пользователи потеряют доступ к ИИ
+• Действие необратимо
+
+<b>Подтвердите удаление:</b>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🗑️ Да, удалить", callback_data="openai_confirm_delete")],
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="admin_ai")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ AI agent deletion confirmation displayed", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error showing deletion confirmation", error=str(e))
+            await callback.answer("❌ Ошибка при загрузке", show_alert=True)
+    
+    async def cb_confirm_delete_agent(self, callback: CallbackQuery):
+        """Подтверждение удаления агента - делегируем в OpenAI handler"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await callback.answer("❌ Ошибка создания обработчика", show_alert=True)
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_confirm_delete(callback, is_owner_check)
+            
+            logger.info("✅ AI agent deletion delegated to OpenAI handler", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error in agent deletion", error=str(e))
+            await callback.answer("❌ Ошибка при удалении агента", show_alert=True)
+    
+    async def cb_edit_agent_name(self, callback: CallbackQuery, state: FSMContext):
+        """Редактирование имени агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+            
+            if ai_type == "none":
+                await callback.answer("❌ ИИ агент не найден", show_alert=True)
+                return
+            
+            agent_settings = ai_config.get('settings', {})
+            current_name = agent_settings.get('agent_name', 'ИИ Агент')
+            
+            await state.set_state(AISettingsStates.admin_editing_agent_name)
+            
+            text = f"""
+✏️ <b>Изменение имени агента</b>
+
+<b>Текущее имя:</b> {current_name}
+
+<b>Введите новое имя для агента:</b>
+
+<b>Хорошие примеры:</b>
+• Консультант по продажам
+• Помощник по SEO  
+• Эксперт по недвижимости
+• Техподдержка
+
+<i>Введите новое имя:</i>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="configure_openai_agent")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ Agent name editing started", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error starting name editing", error=str(e))
+            await callback.answer("❌ Ошибка при запуске редактирования", show_alert=True)
+    
+    async def cb_edit_agent_prompt(self, callback: CallbackQuery, state: FSMContext):
+        """Редактирование промпта агента"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            ai_status, ai_type, ai_config = await self._get_ai_agent_info_fresh()
+            
+            if ai_type == "none":
+                await callback.answer("❌ ИИ агент не найден", show_alert=True)
+                return
+            
+            agent_settings = ai_config.get('settings', {})
+            current_prompt = agent_settings.get('system_prompt', 'Не настроен')
+            
+            await state.set_state(AISettingsStates.admin_editing_agent_prompt)
+            
+            # Показываем первые 300 символов промпта
+            prompt_preview = current_prompt[:300] + "..." if len(current_prompt) > 300 else current_prompt
+            
+            text = f"""
+🎭 <b>Изменение роли агента</b>
+
+<b>Текущая роль:</b>
+<code>{prompt_preview}</code>
+
+<b>Введите новую роль и инструкции для агента:</b>
+
+<b>Советы для хорошего промпта:</b>
+• Четко опишите роль агента
+• Укажите как он должен отвечать
+• Добавьте специфику вашего бизнеса
+• Определите стиль общения
+
+<i>Введите новую роль:</i>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="configure_openai_agent")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ Agent prompt editing started", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error starting prompt editing", error=str(e))
+            await callback.answer("❌ Ошибка при запуске редактирования", show_alert=True)
+    
+    async def cb_ai_exit_conversation(self, callback: CallbackQuery, state: FSMContext):
+        """Завершение диалога с ИИ (тестирование)"""
+        await callback.answer()
+        
+        if not self._is_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
+            return
+        
+        try:
+            await state.clear()
+            
+            text = """
+🚪 <b>Тестирование завершено</b>
+
+Диалог с ИИ агентом закончен.
+
+<b>Что дальше:</b>
+• Если агент работает хорошо - он готов к использованию
+• Если нужно изменить поведение - настройте роль
+• Для дополнительной настройки используйте меню конфигурации
+
+<b>Вернуться к управлению ИИ?</b>
+"""
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🤖 Управление ИИ", callback_data="admin_ai")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main")]
+            ])
+            
+            await self._safe_edit_message(callback, text, reply_markup=keyboard)
+            
+            logger.info("✅ AI testing conversation ended", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error ending AI conversation", error=str(e))
+            await callback.answer("❌ Ошибка при завершении диалога", show_alert=True)
+    
+    # ===== ✅ НОВОЕ: FSM ОБРАБОТЧИКИ ДЛЯ ИИ =====
+    
+    async def handle_openai_name_input(self, message: Message, state: FSMContext):
+        """Обработка ввода имени OpenAI агента"""
+        if not self._is_owner(message.from_user.id):
+            await message.answer("❌ Доступ запрещен")
+            return
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await message.answer("❌ Ошибка создания обработчика")
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_name_input(message, state, is_owner_check)
+            
+            logger.info("✅ OpenAI name input handled", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error handling name input", error=str(e))
+            await message.answer("❌ Ошибка при обработке имени")
+    
+    async def handle_openai_role_input(self, message: Message, state: FSMContext):
+        """Обработка ввода роли OpenAI агента"""
+        if not self._is_owner(message.from_user.id):
+            await message.answer("❌ Доступ запрещен")
+            return
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await message.answer("❌ Ошибка создания обработчика")
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_role_input(message, state, is_owner_check)
+            
+            logger.info("✅ OpenAI role input handled", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error handling role input", error=str(e))
+            await message.answer("❌ Ошибка при обработке роли")
+    
+    async def handle_agent_name_edit(self, message: Message, state: FSMContext):
+        """Обработка редактирования имени агента"""
+        if not self._is_owner(message.from_user.id):
+            await message.answer("❌ Доступ запрещен")
+            return
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await message.answer("❌ Ошибка создания обработчика")
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_name_edit_input(message, state, is_owner_check)
+            
+            logger.info("✅ Agent name edit handled", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error handling name edit", error=str(e))
+            await message.answer("❌ Ошибка при редактировании имени")
+    
+    async def handle_agent_prompt_edit(self, message: Message, state: FSMContext):
+        """Обработка редактирования промпта агента"""
+        if not self._is_owner(message.from_user.id):
+            await message.answer("❌ Доступ запрещен")
+            return
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await message.answer("❌ Ошибка создания обработчика")
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_prompt_edit_input(message, state, is_owner_check)
+            
+            logger.info("✅ Agent prompt edit handled", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error handling prompt edit", error=str(e))
+            await message.answer("❌ Ошибка при редактировании промпта")
+    
+    async def handle_admin_ai_conversation(self, message: Message, state: FSMContext):
+        """Обработка тестирования ИИ агента"""
+        if not self._is_owner(message.from_user.id):
+            await message.answer("❌ Доступ запрещен")
+            return
+        
+        try:
+            # Проверяем команды выхода
+            if message.text in ['/exit', '/stop', '/cancel']:
+                await state.clear()
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🤖 Управление ИИ", callback_data="admin_ai")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin_main")]
+                ])
+                
+                await message.answer("🚪 Тестирование ИИ завершено", reply_markup=keyboard)
+                return
+            
+            # Делегируем в AI handler
+            ai_handler = await self._get_ai_handler()
+            if not ai_handler:
+                await message.answer("❌ Ошибка инициализации ИИ")
+                return
+            
+            await ai_handler.handle_admin_ai_conversation(message, state)
+            
+            logger.info("✅ Admin AI conversation handled", bot_id=self.bot_id)
+            
+        except Exception as e:
+            logger.error("💥 Error in admin AI conversation", error=str(e))
+            await message.answer("❌ Ошибка при общении с ИИ")
+    
+    # ===== МАССОВЫЕ РАССЫЛКИ =====
+    
     async def cb_mass_broadcast_main(self, callback: CallbackQuery):
         """Главное меню массовых рассылок"""
         await callback.answer()
@@ -592,6 +1243,8 @@ class AdminHandler:
         
         from .mass_broadcast_handlers import show_mass_broadcast_main_menu
         await show_mass_broadcast_main_menu(callback, self.bot_id, self.bot_username, self.db)
+    
+    # ===== СТАТИСТИКА И ТОКЕНЫ =====
     
     async def cb_admin_stats(self, callback: CallbackQuery):
         """Статистика бота"""
@@ -613,7 +1266,7 @@ class AdminHandler:
         
         await self._show_token_stats(callback)
     
-    # ✅ УПРОЩЕННЫЕ МЕТОДЫ ДЛЯ НАСТРОЙКИ ПОДПИСКИ
+    # ===== НАСТРОЙКИ ПОДПИСКИ =====
     
     async def cb_subscription_settings(self, callback: CallbackQuery):
         """✅ ИСПРАВЛЕНО: Упрощенные настройки подписки с fresh data"""
@@ -920,6 +1573,8 @@ class AdminHandler:
         
         await callback.answer("🚧 Редактирование сообщения будет добавлено в следующем обновлении", show_alert=True)
     
+    # ===== МЕТОДЫ ОТОБРАЖЕНИЯ СТАТИСТИКИ =====
+    
     async def _show_bot_stats(self, callback: CallbackQuery):
         """Показать статистику бота"""
         try:
@@ -1091,6 +1746,8 @@ class AdminHandler:
                         exc_info=True)
             await callback.answer("Ошибка при загрузке статистики токенов", show_alert=True)
     
+    # ===== DEBUG МЕТОДЫ =====
+    
     async def debug_owner_message(self, message: Message):
         """Debug метод"""
         user_id = message.from_user.id
@@ -1143,5 +1800,7 @@ class AdminHandler:
             f"Channel Username: {channel_info['channel_username']}\n"
             f"Has Channel: {bool(channel_info['channel_id'])}\n\n"
             f"📨 <b>Broadcast Stats:</b>\n"
-            f"Broadcasts Sent: {broadcasts_sent}"
+            f"Broadcasts Sent: {broadcasts_sent}\n\n"
+            f"🤖 <b>AI Handler Status:</b>\n"
+            f"AI Handler Initialized: {self._ai_handler is not None}"
         )
