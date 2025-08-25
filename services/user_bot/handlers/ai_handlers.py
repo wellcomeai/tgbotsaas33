@@ -6,6 +6,7 @@ AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 ✅ ЕДИНАЯ СИСТЕМА ПРОВЕРОК: AIAccessChecker
 ✅ ИНСТАНС-ПОДХОД: Без глобальных переменных
 ✅ ИСПРАВЛЕНО: handle_user_ai_exit() теперь показывает кнопку ИИ после завершения
+✅ ИСПРАВЛЕНО: Разные callback_data для админа и пользователей (устранен конфликт)
 """
 
 import asyncio
@@ -453,8 +454,9 @@ class AIHandler:
                 response = await openai_handler.handle_openai_conversation(message, data)
                 
                 if response:
+                    # ✅ ИЗМЕНЕНО: Используем admin_ai_exit_conversation для админа
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="ai_exit_conversation")]
+                        [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="admin_ai_exit_conversation")]
                     ])
                     
                     await message.answer(response, reply_markup=keyboard)
@@ -526,8 +528,9 @@ class AIHandler:
 <b>Напишите ваш вопрос:</b>
 """
             
+            # ✅ ИЗМЕНЕНО: Используем user_ai_exit_conversation для пользователей
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="ai_exit_conversation")]
+                [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="user_ai_exit_conversation")]
             ])
             
             await message.answer(welcome_text, reply_markup=keyboard)
@@ -581,8 +584,9 @@ class AIHandler:
             ai_response = await self._get_openai_response_for_user(message, user.id)
             
             if ai_response:
+                # ✅ ИЗМЕНЕНО: Используем user_ai_exit_conversation для пользователей
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="ai_exit_conversation")]
+                    [InlineKeyboardButton(text="🚪 Завершить диалог", callback_data="user_ai_exit_conversation")]
                 ])
                 
                 await message.answer(ai_response, reply_markup=keyboard)
@@ -723,9 +727,10 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             F.from_user.id == owner_user_id
         )
         
+        # ✅ ИЗМЕНЕНО: Используем admin_ai_exit_conversation для админа
         dp.callback_query.register(
             ai_handler.handle_admin_ai_exit_conversation,
-            F.data == "ai_exit_conversation",
+            F.data == "admin_ai_exit_conversation",
             F.from_user.id == owner_user_id
         )
         
@@ -753,10 +758,10 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             F.from_user.id != owner_user_id
         )
         
-        # Завершение диалога для пользователей
+        # ✅ ИЗМЕНЕНО: Используем user_ai_exit_conversation для пользователей
         dp.callback_query.register(
             ai_handler.handle_user_ai_exit,
-            F.data == "ai_exit_conversation",
+            F.data == "user_ai_exit_conversation",
             F.from_user.id != owner_user_id
         )
         
@@ -772,7 +777,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                    owner_user_id=owner_user_id,
                    admin_handlers=7,
                    user_handlers=4,
-                   improvements=["AIAccessChecker", "No global vars", "Separate FSM states", "Fixed user exit button"])
+                   improvements=["AIAccessChecker", "No global vars", "Separate FSM states", "Fixed user exit button", "Separate callback_data"])
         
     except Exception as e:
         logger.error("💥 Failed to register AI handlers", 
