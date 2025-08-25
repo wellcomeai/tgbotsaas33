@@ -80,9 +80,6 @@ def register_admin_handlers(dp: Dispatcher, **kwargs):
             AISettingsStates.admin_in_ai_conversation
         )
         
-        # ===== МАССОВЫЕ РАССЫЛКИ =====
-        dp.callback_query.register(handler.cb_mass_broadcast_main, F.data == "mass_broadcast_main")
-        
         # ===== НАСТРОЙКИ ПОДПИСКИ =====
         dp.callback_query.register(handler.cb_subscription_settings, F.data == "admin_subscription")
         dp.callback_query.register(handler.cb_toggle_subscription, F.data == "toggle_subscription")
@@ -102,7 +99,7 @@ def register_admin_handlers(dp: Dispatcher, **kwargs):
                    bot_id=bot_config['bot_id'], 
                    owner_id=bot_config['owner_user_id'],
                    ai_handlers_count=9,
-                   total_handlers=20)
+                   total_handlers=19)
         
     except Exception as e:
         logger.error("💥 Failed to register admin handlers", 
@@ -1234,19 +1231,6 @@ class AdminHandler:
             logger.error("💥 Error in admin AI conversation", error=str(e))
             await message.answer("❌ Ошибка при общении с ИИ")
     
-    # ===== МАССОВЫЕ РАССЫЛКИ =====
-    
-    async def cb_mass_broadcast_main(self, callback: CallbackQuery):
-        """Главное меню массовых рассылок"""
-        await callback.answer()
-        
-        if not self._is_owner(callback.from_user.id):
-            await callback.answer("❌ Доступ запрещен", show_alert=True)
-            return
-        
-        from .mass_broadcast_handlers import show_mass_broadcast_main_menu
-        await show_mass_broadcast_main_menu(callback, self.bot_id, self.bot_username, self.db)
-    
     # ===== СТАТИСТИКА И ТОКЕНЫ =====
     
     async def cb_admin_stats(self, callback: CallbackQuery):
@@ -1807,3 +1791,79 @@ class AdminHandler:
             f"🤖 <b>AI Handler Status:</b>\n"
             f"AI Handler Initialized: {self._ai_handler is not None}"
         )
+
+
+# ===== ФУНКЦИЯ ДЛЯ ВНЕШНЕГО ИСПОЛЬЗОВАНИЯ =====
+
+async def show_mass_broadcast_main_menu(callback: CallbackQuery, bot_id: str, bot_username: str, db):
+    """
+    Функция для внешнего показа меню массовых рассылок 
+    (для использования из других обработчиков)
+    """
+    try:
+        # Получаем статистику
+        stats = await db.get_mass_broadcast_stats(bot_id, days=30)
+        
+        text = f"""
+📨 <b>Массовые рассылки @{bot_username}</b>
+
+📊 <b>Статистика за 30 дней:</b>
+   Отправлено рассылок: {stats.get('total_broadcasts', 0)}
+   Мгновенных: {stats.get('by_type', {}).get('instant', 0)}
+   Запланированных: {stats.get('by_type', {}).get('scheduled', 0)}
+   
+📈 <b>Доставка:</b>
+   Успешно доставлено: {stats.get('deliveries', {}).get('successful', 0)}
+   Ошибок доставки: {stats.get('deliveries', {}).get('failed', 0)}
+   Процент успеха: {stats.get('deliveries', {}).get('success_rate', 0)}%
+
+Выберите тип рассылки:
+"""
+        
+        # Безопасное редактирование сообщения
+        try:
+            if callback.message.text:
+                await callback.message.edit_text(
+                    text=text, 
+                    reply_markup=AdminKeyboards.mass_broadcast_main_menu(),
+                    parse_mode="HTML"
+                )
+            elif callback.message.caption is not None:
+                await callback.message.edit_caption(
+                    caption=text, 
+                    reply_markup=AdminKeyboards.mass_broadcast_main_menu(),
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.message.delete()
+                await callback.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=text,
+                    reply_markup=AdminKeyboards.mass_broadcast_main_menu(),
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to edit message safely, using fallback: {e}")
+            try:
+                await callback.message.delete()
+                await callback.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=text,
+                    reply_markup=AdminKeyboards.mass_broadcast_main_menu(),
+                    parse_mode="HTML"
+                )
+            except Exception as fallback_error:
+                logger.error(f"Fallback message edit also failed: {fallback_error}")
+                await callback.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=text,
+                    reply_markup=AdminKeyboards.mass_broadcast_main_menu(),
+                    parse_mode="HTML"
+                )
+        
+        logger.info("✅ Mass broadcast menu displayed successfully", bot_id=bot_id)
+        
+    except Exception as e:
+        logger.error("💥 Failed to show mass broadcast menu", 
+                    bot_id=bot_id, error=str(e), exc_info=True)
+        await callback.answer("❌ Ошибка при загрузке меню рассылок", show_alert=True)
