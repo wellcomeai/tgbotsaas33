@@ -58,7 +58,7 @@ def register_channel_handlers(dp: Dispatcher, **kwargs):
         dp.message.register(
             handler.handle_welcome_button_click,
             F.chat.type == "private",
-            F.text.regexp(r'^.{1,50}$'),
+            F.text.regexp(r'^(?!🤖 Позвать ИИ$).{1,50}$'),
             F.from_user.id != owner_user_id
         )
         
