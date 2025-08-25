@@ -4,6 +4,7 @@
 ✅ СОХРАНЕНО: Вся существующая логика (статистика, настройки, подписки)
 ✅ ДОБАВЛЕНО: Полноценное управление OpenAI агентами
 ✅ АРХИТЕКТУРА: AdminHandler использует AIHandler методы через делегирование
+✅ ИСПРАВЛЕНО: Конфликт callback_data для кнопки завершения диалога с ИИ
 """
 
 import structlog
@@ -54,7 +55,8 @@ def register_admin_handlers(dp: Dispatcher, **kwargs):
         dp.callback_query.register(handler.cb_confirm_delete_agent, F.data == "openai_confirm_delete")
         dp.callback_query.register(handler.cb_edit_agent_name, F.data == "openai_edit_name")
         dp.callback_query.register(handler.cb_edit_agent_prompt, F.data == "openai_edit_prompt")
-        dp.callback_query.register(handler.cb_ai_exit_conversation, F.data == "ai_exit_conversation")
+        # ✅ ИСПРАВЛЕНО: Новый callback_data для админского завершения диалога
+        dp.callback_query.register(handler.cb_admin_ai_exit_conversation, F.data == "admin_ai_exit_conversation")
         
         # ===== ✅ НОВОЕ: FSM ОБРАБОТЧИКИ ДЛЯ ИИ =====
         dp.message.register(
@@ -893,8 +895,9 @@ class AdminHandler:
 <i>Для выхода используйте кнопку ниже или команды /exit, /stop</i>
 """
             
+            # ✅ ИСПРАВЛЕНО: Используем admin-специфичный callback_data
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚪 Завершить тестирование", callback_data="ai_exit_conversation")]
+                [InlineKeyboardButton(text="🚪 Завершить тестирование", callback_data="admin_ai_exit_conversation")]
             ])
             
             await self._safe_edit_message(callback, text, reply_markup=keyboard)
@@ -1075,8 +1078,8 @@ class AdminHandler:
             logger.error("💥 Error starting prompt editing", error=str(e))
             await callback.answer("❌ Ошибка при запуске редактирования", show_alert=True)
     
-    async def cb_ai_exit_conversation(self, callback: CallbackQuery, state: FSMContext):
-        """Завершение диалога с ИИ (тестирование)"""
+    async def cb_admin_ai_exit_conversation(self, callback: CallbackQuery, state: FSMContext):
+        """✅ ИСПРАВЛЕНО: Завершение диалога с ИИ (тестирование) - переименованный метод"""
         await callback.answer()
         
         if not self._is_owner(callback.from_user.id):
