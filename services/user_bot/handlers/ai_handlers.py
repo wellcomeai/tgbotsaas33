@@ -5,6 +5,7 @@ AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 ✅ ЧИСТОЕ РАЗДЕЛЕНИЕ: channel_handlers показывает кнопку, ai_handlers её обрабатывает
 ✅ ЕДИНАЯ СИСТЕМА ПРОВЕРОК: AIAccessChecker
 ✅ ИНСТАНС-ПОДХОД: Без глобальных переменных
+✅ ИСПРАВЛЕНО: handle_user_ai_exit() теперь показывает кнопку ИИ после завершения
 """
 
 import asyncio
@@ -594,7 +595,7 @@ class AIHandler:
             await message.answer("❌ Произошла ошибка при общении с ИИ.")
 
     async def handle_user_ai_exit(self, callback: CallbackQuery, state: FSMContext):
-        """🚪 Завершение диалога с ИИ для пользователей"""
+        """🚪 Завершение диалога с ИИ для пользователей - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         user_id = callback.from_user.id
         
         logger.info("🚪 User AI conversation exit", user_id=user_id)
@@ -606,15 +607,34 @@ class AIHandler:
             if current_state:
                 await state.clear()
             
+            # Редактируем текущее сообщение (убираем кнопку завершения)
             await callback.message.edit_text(
                 "🚪 Диалог с ИИ завершен.\n\n"
-                "Если понадобится помощь - нажмите кнопку \"🤖 Позвать ИИ\" снова!"
+                "Спасибо за общение!"
             )
             
-            logger.info("✅ User AI conversation ended", user_id=user_id)
+            # ✅ НОВОЕ: Отправляем новое сообщение с кнопкой ИИ
+            from ..keyboards import UserKeyboards
+            
+            await callback.message.answer(
+                "💬 Всегда можете обратиться к ИИ снова!",
+                reply_markup=UserKeyboards.ai_button()
+            )
+            
+            logger.info("✅ User AI conversation ended with new AI button", user_id=user_id)
             
         except Exception as e:
             logger.error("💥 Error ending user AI conversation", user_id=user_id, error=str(e))
+            
+            # Fallback: хотя бы попытаемся показать кнопку ИИ
+            try:
+                from ..keyboards import UserKeyboards
+                await callback.message.answer(
+                    "💬 Обратитесь к ИИ снова:",
+                    reply_markup=UserKeyboards.ai_button()
+                )
+            except Exception as fallback_error:
+                logger.error("💥 Fallback also failed", error=str(fallback_error))
 
     async def handle_user_exit_commands(self, message: Message, state: FSMContext):
         """🚪 Команды выхода из диалога для пользователей"""
@@ -752,7 +772,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                    owner_user_id=owner_user_id,
                    admin_handlers=7,
                    user_handlers=4,
-                   improvements=["AIAccessChecker", "No global vars", "Separate FSM states"])
+                   improvements=["AIAccessChecker", "No global vars", "Separate FSM states", "Fixed user exit button"])
         
     except Exception as e:
         logger.error("💥 Failed to register AI handlers", 
