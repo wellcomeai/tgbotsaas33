@@ -2,6 +2,7 @@
 OpenAI Responses API Models
 ✅ ОБНОВЛЕНО: Полная поддержка OpenAI Responses API
 ✅ НОВОЕ: Встроенные инструменты, автоматическое управление контекстом
+✅ НОВОЕ: Модели для работы с файлами и Vector Store
 """
 
 from dataclasses import dataclass
@@ -588,3 +589,64 @@ class OpenAIResponsesValidator:
             return False, "Для file_search необходимо указать vector_store_ids"
         
         return True, ""
+
+
+# ===== VECTOR STORE MODELS =====
+
+@dataclass
+class VectorStoreFile:
+    """Модель файла в vector store"""
+    id: str
+    filename: str
+    size: int
+    created_at: datetime
+    status: str
+    vector_store_id: Optional[str] = None
+
+
+@dataclass
+class VectorStoreInfo:
+    """Информация о vector store"""
+    id: str
+    name: str
+    file_counts: dict
+    status: str
+    created_at: datetime
+    expires_after: Optional[dict] = None
+    
+    def get_total_files(self) -> int:
+        """Общее количество файлов"""
+        return self.file_counts.get('total', 0)
+    
+    def get_processed_files(self) -> int:
+        """Количество обработанных файлов"""
+        return self.file_counts.get('completed', 0)
+    
+    def is_ready(self) -> bool:
+        """Готов ли vector store к использованию"""
+        return self.status == 'completed'
+
+
+@dataclass
+class FileUploadResult:
+    """Результат загрузки файла"""
+    success: bool
+    file_id: Optional[str] = None
+    filename: Optional[str] = None
+    size: Optional[int] = None
+    error: Optional[str] = None
+    vector_store_id: Optional[str] = None
+    
+    @classmethod
+    def success_result(cls, file_id: str, filename: str, size: int, vector_store_id: str = None):
+        return cls(
+            success=True,
+            file_id=file_id,
+            filename=filename,
+            size=size,
+            vector_store_id=vector_store_id
+        )
+    
+    @classmethod
+    def error_result(cls, error: str):
+        return cls(success=False, error=error)
