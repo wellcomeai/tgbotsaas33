@@ -323,7 +323,7 @@ class AIManager:
 
     @staticmethod
     async def _build_agent_config_from_user_bot_row(row) -> Dict:
-        """Вспомогательный метод для построения конфигурации из строки user_bots"""
+        """✅ ИСПРАВЛЕНО: Создание конфигурации из строки БД с правильными vector_store_ids"""
         settings = row.openai_settings or {}
         
         agent_name = (
@@ -345,7 +345,16 @@ class AIManager:
             'gpt-4o'
         )
         
-        return {
+        # ✅ ИСПРАВЛЕНО: Правильное извлечение vector_store_ids
+        vector_store_ids = settings.get('vector_store_ids', [])
+        
+        logger.info("🔍 Building agent config from DB row", 
+                   bot_id=row.bot_id,
+                   agent_name=agent_name,
+                   vector_store_ids=vector_store_ids,
+                   enable_file_search=settings.get('enable_file_search', False))
+        
+        config = {
             'bot_id': row.bot_id,
             'agent_id': row.openai_agent_id,
             'name': agent_name,
@@ -353,7 +362,7 @@ class AIManager:
             'model': model_name,
             'admin_chat_id': row.openai_admin_chat_id,
             
-            # Настройки Responses API из JSON
+            # Настройки Responses API из JSON с fallback
             'store_conversations': row.openai_store_conversations,
             'conversation_retention': row.openai_conversation_retention_days,
             'enable_streaming': settings.get('enable_streaming', True),
@@ -365,15 +374,20 @@ class AIManager:
             'frequency_penalty': settings.get('frequency_penalty', 0.0),
             'presence_penalty': settings.get('presence_penalty', 0.0),
             
-            # Встроенные инструменты из JSON
+            # ✅ ИСПРАВЛЕНО: Встроенные инструменты из JSON с правильными vector_store_ids
             'enable_web_search': settings.get('enable_web_search', False),
             'enable_code_interpreter': settings.get('enable_code_interpreter', False),
             'enable_file_search': settings.get('enable_file_search', False),
             'enable_image_generation': settings.get('enable_image_generation', False),
             
+            # ✅ КРИТИЧНО: Vector Store IDs для file_search
+            'vector_store_ids': vector_store_ids,
+            
             # Дополнительные настройки
             'context_info': settings.get('context_info', True),
             'daily_limit': settings.get('daily_limit'),
+            
+            # ✅ ИСПРАВЛЕНО: settings содержит ВСЕ настройки включая vector_store_ids
             'settings': settings,
             
             # Статус агента
@@ -381,6 +395,15 @@ class AIManager:
             'type': row.ai_assistant_type,
             'agent_source': 'user_bots_table',  # Маркер источника
         }
+        
+        logger.info("✅ Agent config built successfully", 
+                   bot_id=row.bot_id,
+                   agent_id=row.openai_agent_id,
+                   config_keys=list(config.keys()),
+                   settings_vector_stores=len(config['vector_store_ids']),
+                   file_search_enabled=config['enable_file_search'])
+        
+        return config
 
     # ===== OPENAI LEGACY METHODS =====
     
