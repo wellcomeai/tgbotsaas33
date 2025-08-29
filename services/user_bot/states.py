@@ -80,7 +80,8 @@ class AISettingsStates(StatesGroup):
     admin_editing_agent_name = State()        # Админ: Редактирование имени агента
     admin_editing_agent_prompt = State()      # Админ: Редактирование промпта агента
     admin_in_ai_conversation = State()        # Админ: Активный диалог с ИИ агентом (тестирование)
-    
+    admin_uploading_documents = State()
+    admin_managing_vector_stores = State()
     # ===== ✅ НОВЫЕ: ПОЛЬЗОВАТЕЛЬСКИЕ СОСТОЯНИЯ =====
     user_in_ai_conversation = State()         # Пользователь: Активный диалог с ИИ агентом
     user_ai_waiting_input = State()           # Пользователь: Ожидание ввода от ИИ
