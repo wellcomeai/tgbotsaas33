@@ -8,6 +8,9 @@ OpenAI Responses API Models
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -591,28 +594,96 @@ class OpenAIResponsesValidator:
         return True, ""
 
 
-# ===== VECTOR STORE MODELS =====
-
-@dataclass
-class VectorStoreFile:
-    """Модель файла в vector store"""
-    id: str
-    filename: str
-    size: int
-    created_at: datetime
-    status: str
-    vector_store_id: Optional[str] = None
-
+# ===== УЛУЧШЕННЫЕ VECTOR STORE MODELS =====
 
 @dataclass
 class VectorStoreInfo:
-    """Информация о vector store"""
+    """✅ ИСПРАВЛЕНО: Информация о vector store с безопасной обработкой file_counts"""
     id: str
     name: str
     file_counts: dict
     status: str
     created_at: datetime
     expires_after: Optional[dict] = None
+    
+    @classmethod
+    def from_openai_response(cls, response) -> 'VectorStoreInfo':
+        """✅ НОВЫЙ: Создание из ответа OpenAI API с безопасной обработкой"""
+        try:
+            # Безопасное извлечение file_counts
+            file_counts_raw = getattr(response, 'file_counts', None)
+            file_counts = cls._safe_extract_file_counts(file_counts_raw)
+            
+            return cls(
+                id=response.id,
+                name=response.name,
+                file_counts=file_counts,
+                status=getattr(response, 'status', 'unknown'),
+                created_at=response.created_at if hasattr(response, 'created_at') else datetime.now(),
+                expires_after=getattr(response, 'expires_after', None)
+            )
+        except Exception as e:
+            logger.error("💥 Error creating VectorStoreInfo from response", error=str(e))
+            # Fallback для случая ошибки
+            return cls(
+                id=getattr(response, 'id', 'unknown'),
+                name=getattr(response, 'name', 'Unknown Store'),
+                file_counts={"total": 0, "completed": 0, "in_progress": 0, "failed": 0},
+                status='error',
+                created_at=datetime.now()
+            )
+    
+    @staticmethod
+    def _safe_extract_file_counts(file_counts_obj) -> dict:
+        """✅ НОВЫЙ: Статический метод для безопасного извлечения file_counts"""
+        try:
+            if file_counts_obj is None:
+                return {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
+            
+            # Тип 1: Уже словарь
+            if isinstance(file_counts_obj, dict):
+                return {
+                    "total": file_counts_obj.get("total", 0),
+                    "completed": file_counts_obj.get("completed", 0),
+                    "in_progress": file_counts_obj.get("in_progress", 0),
+                    "failed": file_counts_obj.get("failed", 0)
+                }
+            
+            # Тип 2: Объект с атрибутами (стандартный случай для OpenAI SDK)
+            result = {
+                "total": getattr(file_counts_obj, 'total', 0),
+                "completed": getattr(file_counts_obj, 'completed', 0),
+                "in_progress": getattr(file_counts_obj, 'in_progress', 0),
+                "failed": getattr(file_counts_obj, 'failed', 0)
+            }
+            
+            # Проверяем альтернативные названия атрибутов
+            if result["total"] == 0:
+                result["total"] = getattr(file_counts_obj, 'count', 0)
+            
+            if result["completed"] == 0:
+                for attr in ['processed', 'done', 'finished']:
+                    if hasattr(file_counts_obj, attr):
+                        result["completed"] = getattr(file_counts_obj, attr, 0)
+                        break
+            
+            if result["in_progress"] == 0:
+                for attr in ['processing', 'pending']:
+                    if hasattr(file_counts_obj, attr):
+                        result["in_progress"] = getattr(file_counts_obj, attr, 0)
+                        break
+            
+            if result["failed"] == 0:
+                for attr in ['error', 'cancelled']:
+                    if hasattr(file_counts_obj, attr):
+                        result["failed"] = getattr(file_counts_obj, attr, 0)
+                        break
+            
+            return result
+            
+        except Exception as e:
+            logger.error("💥 Error extracting file_counts", error=str(e))
+            return {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
     
     def get_total_files(self) -> int:
         """Общее количество файлов"""
@@ -622,14 +693,92 @@ class VectorStoreInfo:
         """Количество обработанных файлов"""
         return self.file_counts.get('completed', 0)
     
+    def get_processing_files(self) -> int:
+        """Количество обрабатываемых файлов"""
+        return self.file_counts.get('in_progress', 0)
+    
+    def get_failed_files(self) -> int:
+        """Количество файлов с ошибками"""
+        return self.file_counts.get('failed', 0)
+    
     def is_ready(self) -> bool:
         """Готов ли vector store к использованию"""
-        return self.status == 'completed'
+        return self.status == 'completed' or (
+            self.get_total_files() > 0 and 
+            self.get_processed_files() == self.get_total_files()
+        )
+    
+    def get_processing_status(self) -> str:
+        """Получить человекочитаемый статус обработки"""
+        total = self.get_total_files()
+        completed = self.get_processed_files()
+        processing = self.get_processing_files()
+        failed = self.get_failed_files()
+        
+        if total == 0:
+            return "Пусто"
+        elif failed > 0:
+            return f"Ошибки: {failed} из {total}"
+        elif processing > 0:
+            return f"Обработка: {completed}/{total}"
+        elif completed == total:
+            return "Готово"
+        else:
+            return f"Частично: {completed}/{total}"
 
 
 @dataclass
+class VectorStoreFile:
+    """✅ ИСПРАВЛЕНО: Модель файла в vector store"""
+    id: str
+    filename: str
+    size: int
+    created_at: datetime
+    status: str
+    vector_store_id: Optional[str] = None
+    
+    @classmethod
+    def from_openai_response(cls, response, vector_store_id: str = None) -> 'VectorStoreFile':
+        """✅ НОВЫЙ: Создание из ответа OpenAI API"""
+        try:
+            return cls(
+                id=response.id,
+                filename=getattr(response, 'filename', 'unknown'),
+                size=getattr(response, 'bytes', getattr(response, 'size', 0)),
+                created_at=response.created_at if hasattr(response, 'created_at') else datetime.now(),
+                status=getattr(response, 'status', 'unknown'),
+                vector_store_id=vector_store_id
+            )
+        except Exception as e:
+            logger.error("💥 Error creating VectorStoreFile from response", error=str(e))
+            return cls(
+                id=getattr(response, 'id', 'unknown'),
+                filename='Error File',
+                size=0,
+                created_at=datetime.now(),
+                status='error'
+            )
+    
+    def get_size_mb(self) -> float:
+        """Размер файла в МБ"""
+        return round(self.size / (1024 * 1024), 2) if self.size > 0 else 0.0
+    
+    def is_processed(self) -> bool:
+        """Обработан ли файл"""
+        return self.status in ['completed', 'processed', 'done']
+    
+    def is_processing(self) -> bool:
+        """Обрабатывается ли файл"""
+        return self.status in ['processing', 'in_progress', 'pending']
+    
+    def has_error(self) -> bool:
+        """Есть ли ошибка в обработке"""
+        return self.status in ['failed', 'error', 'cancelled']
+
+
+@dataclass 
 class FileUploadResult:
-    """Результат загрузки файла"""
+    """✅ ИСПРАВЛЕНО: Результат загрузки файла"""
     success: bool
     file_id: Optional[str] = None
     filename: Optional[str] = None
@@ -650,3 +799,7 @@ class FileUploadResult:
     @classmethod
     def error_result(cls, error: str):
         return cls(success=False, error=error)
+    
+    def get_size_mb(self) -> float:
+        """Размер файла в МБ"""
+        return round(self.size / (1024 * 1024), 2) if self.size else 0.0
