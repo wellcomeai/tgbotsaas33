@@ -993,11 +993,14 @@ class OpenAIResponsesClient:
                        vector_store_id=vector_store.id, 
                        name=vector_store.name)
             
+            # ✅ ИСПРАВЛЕНО: Безопасное извлечение file_counts
+            file_counts_safe = self._safe_extract_file_counts(getattr(vector_store, 'file_counts', {}))
+            
             return True, {
                 "id": vector_store.id,
                 "name": vector_store.name,
                 "created_at": vector_store.created_at,
-                "file_counts": getattr(vector_store, 'file_counts', {}),
+                "file_counts": file_counts_safe,
                 "status": getattr(vector_store, 'status', 'created')
             }
             
@@ -1057,13 +1060,21 @@ class OpenAIResponsesClient:
             # Получаем обновленную информацию о vector store
             vector_store = await self.client.vector_stores.retrieve(vector_store_id)
             
+            # ✅ ИСПРАВЛЕНО: Безопасное извлечение file_counts
+            file_counts_obj = getattr(vector_store, 'file_counts', None)
+            total_files = 0
+            
+            if file_counts_obj:
+                file_counts_dict = self._safe_extract_file_counts(file_counts_obj)
+                total_files = file_counts_dict.get('total', 0)
+            
             logger.info("✅ Files added to vector store", 
                        vector_store_id=vector_store_id,
-                       total_files=getattr(vector_store.file_counts, 'total', 0) if hasattr(vector_store, 'file_counts') else 0)
+                       total_files=total_files)
             
             return True, {
                 "vector_store_id": vector_store_id,
-                "file_counts": getattr(vector_store, 'file_counts', {}),
+                "file_counts": self._safe_extract_file_counts(file_counts_obj),
                 "status": getattr(vector_store, 'status', 'processing')
             }
             
@@ -1082,11 +1093,14 @@ class OpenAIResponsesClient:
             
             stores_list = []
             for store in vector_stores.data:
+                # ✅ ИСПРАВЛЕНО: Безопасное извлечение file_counts
+                file_counts_safe = self._safe_extract_file_counts(getattr(store, 'file_counts', {}))
+                
                 stores_list.append({
                     "id": store.id,
                     "name": store.name,
                     "created_at": store.created_at,
-                    "file_counts": getattr(store, 'file_counts', {}),
+                    "file_counts": file_counts_safe,
                     "status": getattr(store, 'status', 'unknown')
                 })
             
@@ -1112,6 +1126,75 @@ class OpenAIResponsesClient:
         except Exception as e:
             logger.error("💥 Failed to delete vector store", error=str(e))
             return False, str(e)
+
+    def _safe_extract_file_counts(self, file_counts) -> dict:
+        """✅ НОВЫЙ: Безопасное извлечение file_counts в формат словаря"""
+        try:
+            if file_counts is None:
+                return {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
+            
+            # Тип 1: Уже словарь
+            if isinstance(file_counts, dict):
+                return {
+                    "total": file_counts.get("total", 0),
+                    "completed": file_counts.get("completed", 0),
+                    "in_progress": file_counts.get("in_progress", 0),
+                    "failed": file_counts.get("failed", 0)
+                }
+            
+            # Тип 2: Объект с атрибутами
+            result = {}
+            
+            # Стандартные названия атрибутов OpenAI
+            attr_mapping = {
+                "total": ["total", "count", "total_count"],
+                "completed": ["completed", "processed", "done", "finished"],
+                "in_progress": ["in_progress", "processing", "pending"],
+                "failed": ["failed", "error", "cancelled"]
+            }
+            
+            for key, possible_attrs in attr_mapping.items():
+                value = 0
+                for attr in possible_attrs:
+                    if hasattr(file_counts, attr):
+                        value = getattr(file_counts, attr, 0)
+                        break
+                result[key] = value
+            
+            # Если ничего не найдено, попробуем получить все доступные атрибуты
+            if all(v == 0 for v in result.values()):
+                available_attrs = [attr for attr in dir(file_counts) if not attr.startswith('_')]
+                logger.debug("🔍 Available file_counts attributes", 
+                           type_name=type(file_counts).__name__,
+                           attributes=available_attrs)
+                
+                # Попытка извлечь любые числовые атрибуты
+                for attr in available_attrs:
+                    try:
+                        value = getattr(file_counts, attr, 0)
+                        if isinstance(value, (int, float)) and value >= 0:
+                            if 'total' in attr.lower():
+                                result['total'] = int(value)
+                            elif any(word in attr.lower() for word in ['complete', 'done', 'finish']):
+                                result['completed'] = int(value)
+                            elif any(word in attr.lower() for word in ['progress', 'process', 'pending']):
+                                result['in_progress'] = int(value)
+                            elif any(word in attr.lower() for word in ['fail', 'error', 'cancel']):
+                                result['failed'] = int(value)
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+            
+            logger.debug("📊 File counts extracted", 
+                        original_type=type(file_counts).__name__,
+                        result=result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error("💥 Error in _safe_extract_file_counts", 
+                        error=str(e),
+                        file_counts_type=type(file_counts).__name__ if file_counts else 'None')
+            return {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
 
     # ✅ ОБНОВЛЯЕМ ПРОВЕРКУ ДОСТУПНОСТИ API
     def _check_api_availability(self) -> dict:
