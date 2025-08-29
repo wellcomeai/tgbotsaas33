@@ -6,6 +6,7 @@ OpenAI Responses Client
 ✅ НОВОЕ: Встроенные инструменты (веб-поиск, код, файлы)
 ✅ ИСПРАВЛЕНО: Правильная обработка usage данных без return_usage
 ✅ ИСПРАВЛЕНО: Корректная логика проверки токенов (is not None вместо or)
+✅ НОВОЕ: Методы для работы с vector stores
 """
 
 import os
@@ -13,12 +14,13 @@ import asyncio
 import time
 import uuid
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, BinaryIO
 from datetime import datetime
 import structlog
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from services.notifications import send_token_warning_notification
+import aiofiles
 from .models import (
     OpenAIResponsesAgent, 
     OpenAIResponsesResult, 
@@ -35,6 +37,7 @@ class OpenAIResponsesClient:
     """
     ✅ ОБНОВЛЕНО: Клиент для работы с OpenAI Responses API
     ✅ ИСПРАВЛЕНО: Правильная обработка usage данных без return_usage
+    ✅ НОВОЕ: Поддержка vector stores для работы с файлами
     Автоматическое управление контекстом + встроенные инструменты
     """
     
@@ -964,6 +967,148 @@ class OpenAIResponsesClient:
         except Exception as e:
             logger.error("💥 Error clearing conversation context", error=str(e))
             return False
+
+    # ===== VECTOR STORES MANAGEMENT =====
+
+    async def create_vector_store(self, name: str, expires_after_days: int = 30) -> tuple[bool, dict]:
+        """Создание vector store для файлов"""
+        try:
+            logger.info("📁 Creating vector store", name=name, expires_after_days=expires_after_days)
+            
+            if not self._is_configured():
+                return False, {"error": "OpenAI client not configured"}
+            
+            vector_store = await self.client.beta.vector_stores.create(
+                name=name,
+                expires_after={
+                    "anchor": "last_active_at",
+                    "days": expires_after_days
+                }
+            )
+            
+            logger.info("✅ Vector store created", 
+                       vector_store_id=vector_store.id, 
+                       name=vector_store.name)
+            
+            return True, {
+                "id": vector_store.id,
+                "name": vector_store.name,
+                "created_at": vector_store.created_at,
+                "file_counts": vector_store.file_counts,
+                "status": vector_store.status
+            }
+            
+        except Exception as e:
+            logger.error("💥 Failed to create vector store", error=str(e))
+            return False, {"error": str(e)}
+
+    async def upload_file_to_openai(self, file_path: str, filename: str, purpose: str = "assistants") -> tuple[bool, dict]:
+        """Загрузка файла в OpenAI"""
+        try:
+            logger.info("📤 Uploading file to OpenAI", filename=filename, purpose=purpose)
+            
+            if not self._is_configured():
+                return False, {"error": "OpenAI client not configured"}
+            
+            async with aiofiles.open(file_path, 'rb') as file_data:
+                file_response = await self.client.files.create(
+                    file=(filename, file_data),
+                    purpose=purpose
+                )
+            
+            logger.info("✅ File uploaded to OpenAI", 
+                       file_id=file_response.id,
+                       filename=file_response.filename,
+                       size=file_response.bytes)
+            
+            return True, {
+                "id": file_response.id,
+                "filename": file_response.filename,
+                "bytes": file_response.bytes,
+                "created_at": file_response.created_at,
+                "purpose": file_response.purpose
+            }
+            
+        except Exception as e:
+            logger.error("💥 Failed to upload file to OpenAI", error=str(e))
+            return False, {"error": str(e)}
+
+    async def add_files_to_vector_store(self, vector_store_id: str, file_ids: List[str]) -> tuple[bool, dict]:
+        """Добавление файлов в vector store"""
+        try:
+            logger.info("📎 Adding files to vector store", 
+                       vector_store_id=vector_store_id, 
+                       file_count=len(file_ids))
+            
+            if not self._is_configured():
+                return False, {"error": "OpenAI client not configured"}
+            
+            # Добавляем файлы в vector store
+            for file_id in file_ids:
+                await self.client.beta.vector_stores.files.create(
+                    vector_store_id=vector_store_id,
+                    file_id=file_id
+                )
+            
+            # Ждем обработки файлов
+            await asyncio.sleep(2)  # Даем время на обработку
+            
+            # Получаем обновленную информацию о vector store
+            vector_store = await self.client.beta.vector_stores.retrieve(vector_store_id)
+            
+            logger.info("✅ Files added to vector store", 
+                       vector_store_id=vector_store_id,
+                       total_files=vector_store.file_counts.total)
+            
+            return True, {
+                "vector_store_id": vector_store_id,
+                "file_counts": vector_store.file_counts,
+                "status": vector_store.status
+            }
+            
+        except Exception as e:
+            logger.error("💥 Failed to add files to vector store", error=str(e))
+            return False, {"error": str(e)}
+
+    async def list_vector_stores(self) -> tuple[bool, List[dict]]:
+        """Получение списка vector stores"""
+        try:
+            if not self._is_configured():
+                return False, []
+            
+            vector_stores = await self.client.beta.vector_stores.list()
+            
+            stores_list = []
+            for store in vector_stores.data:
+                stores_list.append({
+                    "id": store.id,
+                    "name": store.name,
+                    "created_at": store.created_at,
+                    "file_counts": store.file_counts,
+                    "status": store.status
+                })
+            
+            logger.info("📋 Vector stores listed", count=len(stores_list))
+            return True, stores_list
+            
+        except Exception as e:
+            logger.error("💥 Failed to list vector stores", error=str(e))
+            return False, []
+
+    async def delete_vector_store(self, vector_store_id: str) -> tuple[bool, str]:
+        """Удаление vector store"""
+        try:
+            if not self._is_configured():
+                return False, "OpenAI client not configured"
+            
+            await self.client.beta.vector_stores.delete(vector_store_id)
+            
+            logger.info("🗑️ Vector store deleted", vector_store_id=vector_store_id)
+            return True, "Vector store deleted successfully"
+            
+        except Exception as e:
+            logger.error("💥 Failed to delete vector store", error=str(e))
+            return False, str(e)
     
     def validate_create_request(self, request: OpenAIResponsesRequest) -> tuple[bool, str]:
         """Валидация запроса на создание агента"""
