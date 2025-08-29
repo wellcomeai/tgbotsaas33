@@ -1,5 +1,5 @@
 """
-AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ + ПОДДЕРЖКА ГРУППОВЫХ УПОМИНАНИЙ + КОНТРОЛЬ ДОСТУПА ВЛАДЕЛЬЦА
+AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ + ПОДДЕРЖКА ГРУППОВЫХ УПОМИНАНИЙ + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ
 ✅ АДМИН: Настройка и управление ИИ агентами  
 ✅ ПОЛЬЗОВАТЕЛИ: Обработка диалогов с ИИ (БЕЗ показа кнопки - это в channel_handlers)
 ✅ ЧИСТОЕ РАЗДЕЛЕНИЕ: channel_handlers показывает кнопку, ai_handlers её обрабатывает
@@ -15,6 +15,7 @@ AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 ✅ УЛУЧШЕНО: Детальная диагностика транскрипции голосовых сообщений
 ✅ НОВОЕ: Обработка упоминаний бота в группах (@botname сообщение)
 ✅ НОВОЕ: Контроль доступа владельца через access_control
+✅ НОВОЕ: Полная поддержка управления файлами для OpenAI агентов
 """
 
 import asyncio
@@ -241,6 +242,50 @@ class AIHandler:
         except Exception as e:
             logger.error("💥 Failed to create OpenAIHandler", error=str(e))
             return None
+
+    async def handle_file_management_callbacks(self, callback: CallbackQuery, state: FSMContext):
+        """Обработка callback'ов управления файлами"""
+        logger.info("📁 File management callback", 
+                   user_id=callback.from_user.id,
+                   callback_data=callback.data)
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await callback.answer("❌ Ошибка создания обработчика", show_alert=True)
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            
+            if callback.data == "openai_start_upload":
+                await openai_handler.handle_start_upload(callback, state, is_owner_check)
+            elif callback.data == "openai_finish_upload":
+                await openai_handler.handle_finish_upload(callback, state, is_owner_check)
+            elif callback.data == "openai_manage_files":
+                await openai_handler.handle_manage_files(callback, is_owner_check)
+            
+            logger.info("✅ File management callback handled", callback_data=callback.data)
+            
+        except Exception as e:
+            logger.error("💥 Error in file management callback", error=str(e))
+            await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+    async def handle_document_upload_fsm(self, message: Message, state: FSMContext):
+        """FSM обработчик загрузки документов"""
+        logger.info("📄 Document upload via FSM", user_id=message.from_user.id)
+        
+        try:
+            openai_handler = await self._create_openai_handler()
+            if not openai_handler:
+                await message.answer("❌ Ошибка создания обработчика")
+                return
+            
+            is_owner_check = lambda user_id: self._is_owner(user_id)
+            await openai_handler.handle_document_upload(message, state, is_owner_check)
+            
+        except Exception as e:
+            logger.error("💥 Error in document upload", error=str(e))
+            await message.answer("❌ Произошла ошибка при загрузке файла")
 
     async def _get_fresh_ai_config(self) -> dict:
         """Получить свежую конфигурацию ИИ агента"""
@@ -1194,7 +1239,7 @@ def _is_bot_mentioned(message: Message, bot_username: str) -> bool:
 
 
 def register_ai_handlers(dp: Dispatcher, **kwargs):
-    """✅ ИСПРАВЛЕННАЯ РЕГИСТРАЦИЯ с поддержкой групповых упоминаний + КОНТРОЛЬ ДОСТУПА"""
+    """✅ ИСПРАВЛЕННАЯ РЕГИСТРАЦИЯ с поддержкой групповых упоминаний + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ"""
     
     # Создаем экземпляр обработчика
     ai_handler = AIHandler(
@@ -1207,7 +1252,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
     owner_user_id = ai_handler.owner_user_id
     
     try:
-        logger.info("🎯 Registering AI handlers with GROUP MENTIONS SUPPORT + ENHANCED VOICE DIAGNOSTICS + ACCESS CONTROL", 
+        logger.info("🎯 Registering AI handlers with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT", 
                    bot_id=ai_handler.bot_id,
                    owner_user_id=owner_user_id,
                    new_features=[
@@ -1215,7 +1260,8 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                        "Single increment only in handle_user_ai_conversation", 
                        "Enhanced voice transcription diagnostics",
                        "Complete voice support for admins and users",
-                       "Owner access control integration"
+                       "Owner access control integration",
+                       "File management for OpenAI agents"
                    ])
         
         # ===== 🏆 АДМИНСКИЕ ИИ ОБРАБОТЧИКИ (ТОЛЬКО ВЛАДЕЛЕЦ) =====
@@ -1281,6 +1327,23 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             F.from_user.id == owner_user_id
         )
         
+        # ===== 📁 ОБРАБОТЧИКИ ЗАГРУЗКИ ФАЙЛОВ (ТОЛЬКО ВЛАДЕЛЕЦ) =====
+        
+        # Callback'ы управления файлами
+        dp.callback_query.register(
+            ai_handler.handle_file_management_callbacks,
+            F.data.in_(["openai_start_upload", "openai_finish_upload", "openai_manage_files"]),
+            F.from_user.id == owner_user_id
+        )
+        
+        # FSM для загрузки документов
+        dp.message.register(
+            ai_handler.handle_document_upload_fsm,
+            StateFilter(AISettingsStates.admin_uploading_documents),
+            F.from_user.id == owner_user_id,
+            F.document
+        )
+        
         # ===== 👥 ПОЛЬЗОВАТЕЛЬСКИЕ ИИ ОБРАБОТЧИКИ (НЕ ВЛАДЕЛЕЦ) =====
         
         # ОБРАБОТКА кнопки "Позвать ИИ" (показ кнопки в channel_handlers)
@@ -1332,12 +1395,13 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             lambda message: _is_bot_mentioned(message, kwargs['bot_config']['bot_username'])
         )
         
-        logger.info("✅ AI handlers registered with GROUP MENTIONS + COMPLETE VOICE SUPPORT + ACCESS CONTROL", 
+        logger.info("✅ AI handlers registered with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT", 
                    owner_user_id=owner_user_id,
                    admin_handlers=8,  
                    user_handlers=5,
-                   group_handlers=1,  # Новый групповой обработчик
-                   total_handlers=14,
+                   group_handlers=1,
+                   file_handlers=2,  # Новые обработчики файлов
+                   total_handlers=16,  # Обновленное количество
                    critical_fixes=[
                        "Message increment ONLY in handle_user_ai_conversation - NO DOUBLE INCREMENT",
                        "Safe message.text check in handle_admin_ai_conversation", 
@@ -1346,7 +1410,8 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                        "COMPLETE VOICE SUPPORT for both users AND admins without frozen instance errors",
                        "New _get_openai_response_for_admin_with_text method for admin voice messages",
                        "GROUP MENTIONS SUPPORT: @botname message triggers AI response in groups",
-                       "OWNER ACCESS CONTROL: All AI handlers check owner access before processing"
+                       "OWNER ACCESS CONTROL: All AI handlers check owner access before processing",
+                       "FILE MANAGEMENT: Complete file upload/management support for OpenAI agents"
                    ])
         
     except Exception as e:
