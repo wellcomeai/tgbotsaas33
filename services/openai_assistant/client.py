@@ -7,7 +7,8 @@ OpenAI Responses Client
 ✅ ИСПРАВЛЕНО: Правильная обработка usage данных без return_usage
 ✅ ИСПРАВЛЕНО: Корректная логика проверки токенов (is not None вместо or)
 ✅ НОВОЕ: Методы для работы с vector stores
-✅ ИСПРАВЛЕНО: Улучшенные методы vector stores с проверкой API доступности
+✅ ИСПРАВЛЕНО: Vector stores теперь работают БЕЗ .beta (новый OpenAI SDK)
+✅ ИСПРАВЛЕНО: Убран aiofiles, исправлены RuntimeWarning с coroutines
 """
 
 import os
@@ -21,7 +22,6 @@ import structlog
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from services.notifications import send_token_warning_notification
-import aiofiles
 from .models import (
     OpenAIResponsesAgent, 
     OpenAIResponsesResult, 
@@ -39,6 +39,7 @@ class OpenAIResponsesClient:
     ✅ ОБНОВЛЕНО: Клиент для работы с OpenAI Responses API
     ✅ ИСПРАВЛЕНО: Правильная обработка usage данных без return_usage
     ✅ НОВОЕ: Поддержка vector stores для работы с файлами
+    ✅ ИСПРАВЛЕНО: Vector stores работают БЕЗ .beta (новый SDK)
     Автоматическое управление контекстом + встроенные инструменты
     """
     
@@ -971,59 +972,16 @@ class OpenAIResponsesClient:
 
     # ===== VECTOR STORES MANAGEMENT =====
 
-    async def list_vector_stores(self) -> tuple[bool, List[dict]]:
-        """✅ ИСПРАВЛЕНО: Получение списка vector stores"""
-        try:
-            if not self._is_configured():
-                return False, []
-            
-            # ✅ ИСПРАВЛЕНО: Проверяем доступность beta API
-            if not hasattr(self.client, 'beta'):
-                logger.warning("⚠️ Beta API not available in current OpenAI client version")
-                return False, []
-            
-            if not hasattr(self.client.beta, 'vector_stores'):
-                logger.warning("⚠️ Vector stores API not available in current OpenAI client version")
-                return False, []
-            
-            vector_stores = await self.client.beta.vector_stores.list()
-            
-            stores_list = []
-            for store in vector_stores.data:
-                stores_list.append({
-                    "id": store.id,
-                    "name": store.name,
-                    "created_at": store.created_at,
-                    "file_counts": getattr(store, 'file_counts', {}),
-                    "status": getattr(store, 'status', 'unknown')
-                })
-            
-            logger.info("📋 Vector stores listed", count=len(stores_list))
-            return True, stores_list
-            
-        except AttributeError as e:
-            if 'vector_stores' in str(e):
-                logger.error("❌ Vector stores API not available in current OpenAI version", error=str(e))
-                return False, []
-            raise
-        except Exception as e:
-            logger.error("💥 Failed to list vector stores", error=str(e))
-            return False, []
-
     async def create_vector_store(self, name: str, expires_after_days: int = 30) -> tuple[bool, dict]:
-        """✅ ИСПРАВЛЕНО: Создание vector store для файлов"""
+        """✅ ИСПРАВЛЕНО: Создание vector store БЕЗ .beta"""
         try:
             logger.info("📁 Creating vector store", name=name, expires_after_days=expires_after_days)
             
             if not self._is_configured():
                 return False, {"error": "OpenAI client not configured"}
             
-            # ✅ ИСПРАВЛЕНО: Проверяем доступность API
-            if not hasattr(self.client, 'beta') or not hasattr(self.client.beta, 'vector_stores'):
-                logger.warning("⚠️ Vector stores API not available")
-                return False, {"error": "Vector stores API not available in current OpenAI version"}
-            
-            vector_store = await self.client.beta.vector_stores.create(
+            # ✅ ИСПРАВЛЕНО: Убираем .beta
+            vector_store = await self.client.vector_stores.create(
                 name=name,
                 expires_after={
                     "anchor": "last_active_at",
@@ -1043,71 +1001,20 @@ class OpenAIResponsesClient:
                 "status": getattr(vector_store, 'status', 'created')
             }
             
-        except AttributeError as e:
-            if 'vector_stores' in str(e):
-                logger.error("❌ Vector stores API not available", error=str(e))
-                return False, {"error": "Vector stores API not supported"}
-            raise
         except Exception as e:
             logger.error("💥 Failed to create vector store", error=str(e))
             return False, {"error": str(e)}
 
-    async def add_files_to_vector_store(self, vector_store_id: str, file_ids: List[str]) -> tuple[bool, dict]:
-        """✅ ИСПРАВЛЕНО: Добавление файлов в vector store"""
-        try:
-            logger.info("📎 Adding files to vector store", 
-                       vector_store_id=vector_store_id, 
-                       file_count=len(file_ids))
-            
-            if not self._is_configured():
-                return False, {"error": "OpenAI client not configured"}
-            
-            # ✅ ИСПРАВЛЕНО: Проверяем доступность API
-            if not hasattr(self.client, 'beta') or not hasattr(self.client.beta, 'vector_stores'):
-                logger.warning("⚠️ Vector stores API not available")
-                return False, {"error": "Vector stores API not available"}
-            
-            # Добавляем файлы в vector store
-            for file_id in file_ids:
-                await self.client.beta.vector_stores.files.create(
-                    vector_store_id=vector_store_id,
-                    file_id=file_id
-                )
-            
-            # Ждем обработки файлов
-            await asyncio.sleep(2)  # Даем время на обработку
-            
-            # Получаем обновленную информацию о vector store
-            vector_store = await self.client.beta.vector_stores.retrieve(vector_store_id)
-            
-            logger.info("✅ Files added to vector store", 
-                       vector_store_id=vector_store_id,
-                       total_files=getattr(vector_store.file_counts, 'total', 0) if hasattr(vector_store, 'file_counts') else 0)
-            
-            return True, {
-                "vector_store_id": vector_store_id,
-                "file_counts": getattr(vector_store, 'file_counts', {}),
-                "status": getattr(vector_store, 'status', 'processing')
-            }
-            
-        except AttributeError as e:
-            if 'vector_stores' in str(e):
-                logger.error("❌ Vector stores API not available", error=str(e))
-                return False, {"error": "Vector stores API not supported"}
-            raise
-        except Exception as e:
-            logger.error("💥 Failed to add files to vector store", error=str(e))
-            return False, {"error": str(e)}
-
     async def upload_file_to_openai(self, file_path: str, filename: str, purpose: str = "assistants") -> tuple[bool, dict]:
-        """Загрузка файла в OpenAI"""
+        """✅ ИСПРАВЛЕНО: Загрузка файла БЕЗ aiofiles"""
         try:
             logger.info("📤 Uploading file to OpenAI", filename=filename, purpose=purpose)
             
             if not self._is_configured():
                 return False, {"error": "OpenAI client not configured"}
             
-            async with aiofiles.open(file_path, 'rb') as file_data:
+            # ✅ ИСПРАВЛЕНО: Убираем aiofiles, используем обычный open
+            with open(file_path, 'rb') as file_data:
                 file_response = await self.client.files.create(
                     file=(filename, file_data),
                     purpose=purpose
@@ -1130,13 +1037,74 @@ class OpenAIResponsesClient:
             logger.error("💥 Failed to upload file to OpenAI", error=str(e))
             return False, {"error": str(e)}
 
+    async def add_files_to_vector_store(self, vector_store_id: str, file_ids: List[str]) -> tuple[bool, dict]:
+        """✅ ИСПРАВЛЕНО: Добавление файлов БЕЗ .beta"""
+        try:
+            logger.info("📎 Adding files to vector store", 
+                       vector_store_id=vector_store_id, 
+                       file_count=len(file_ids))
+            
+            if not self._is_configured():
+                return False, {"error": "OpenAI client not configured"}
+            
+            # ✅ ИСПРАВЛЕНО: Убираем .beta и используем create_and_poll
+            for file_id in file_ids:
+                await self.client.vector_stores.files.create_and_poll(
+                    vector_store_id=vector_store_id,
+                    file_id=file_id
+                )
+            
+            # Получаем обновленную информацию о vector store
+            vector_store = await self.client.vector_stores.retrieve(vector_store_id)
+            
+            logger.info("✅ Files added to vector store", 
+                       vector_store_id=vector_store_id,
+                       total_files=getattr(vector_store.file_counts, 'total', 0) if hasattr(vector_store, 'file_counts') else 0)
+            
+            return True, {
+                "vector_store_id": vector_store_id,
+                "file_counts": getattr(vector_store, 'file_counts', {}),
+                "status": getattr(vector_store, 'status', 'processing')
+            }
+            
+        except Exception as e:
+            logger.error("💥 Failed to add files to vector store", error=str(e))
+            return False, {"error": str(e)}
+
+    async def list_vector_stores(self) -> tuple[bool, List[dict]]:
+        """✅ ИСПРАВЛЕНО: Получение списка БЕЗ .beta"""
+        try:
+            if not self._is_configured():
+                return False, []
+            
+            # ✅ ИСПРАВЛЕНО: Убираем .beta
+            vector_stores = await self.client.vector_stores.list()
+            
+            stores_list = []
+            for store in vector_stores.data:
+                stores_list.append({
+                    "id": store.id,
+                    "name": store.name,
+                    "created_at": store.created_at,
+                    "file_counts": getattr(store, 'file_counts', {}),
+                    "status": getattr(store, 'status', 'unknown')
+                })
+            
+            logger.info("📋 Vector stores listed", count=len(stores_list))
+            return True, stores_list
+            
+        except Exception as e:
+            logger.error("💥 Failed to list vector stores", error=str(e))
+            return False, []
+
     async def delete_vector_store(self, vector_store_id: str) -> tuple[bool, str]:
-        """Удаление vector store"""
+        """✅ ИСПРАВЛЕНО: Удаление БЕЗ .beta"""
         try:
             if not self._is_configured():
                 return False, "OpenAI client not configured"
             
-            await self.client.beta.vector_stores.delete(vector_store_id)
+            # ✅ ИСПРАВЛЕНО: Убираем .beta
+            await self.client.vector_stores.delete(vector_store_id)
             
             logger.info("🗑️ Vector store deleted", vector_store_id=vector_store_id)
             return True, "Vector store deleted successfully"
@@ -1144,6 +1112,41 @@ class OpenAIResponsesClient:
         except Exception as e:
             logger.error("💥 Failed to delete vector store", error=str(e))
             return False, str(e)
+
+    # ✅ ОБНОВЛЯЕМ ПРОВЕРКУ ДОСТУПНОСТИ API
+    def _check_api_availability(self) -> dict:
+        """✅ ОБНОВЛЕНО: Проверка доступности БЕЗ .beta"""
+        availability = {
+            'chat_completions': False,
+            'responses_api': False,
+            'vector_stores': False,
+            'files': False
+        }
+        
+        try:
+            if self.client:
+                # Проверяем Chat Completions
+                if hasattr(self.client, 'chat') and hasattr(self.client.chat, 'completions'):
+                    availability['chat_completions'] = True
+                
+                # Проверяем Responses API
+                if hasattr(self.client, 'responses') and hasattr(self.client.responses, 'create'):
+                    availability['responses_api'] = True
+                
+                # ✅ ИСПРАВЛЕНО: Проверяем Vector Stores БЕЗ .beta
+                if hasattr(self.client, 'vector_stores'):
+                    availability['vector_stores'] = True
+                
+                # Проверяем Files API
+                if hasattr(self.client, 'files'):
+                    availability['files'] = True
+            
+            logger.info("🔍 OpenAI API availability check", **availability)
+            
+        except Exception as e:
+            logger.error("💥 Error checking API availability", error=str(e))
+        
+        return availability
     
     def validate_create_request(self, request: OpenAIResponsesRequest) -> tuple[bool, str]:
         """Валидация запроса на создание агента"""
