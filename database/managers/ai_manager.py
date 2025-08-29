@@ -8,10 +8,11 @@ Responsibilities:
 - AI assistant settings and statistics
 - AI platform detection and validation
 - AI configuration synchronization and validation
+- Vector Store and Knowledge Base management
 """
 
 from datetime import datetime
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, List
 from sqlalchemy import select, update, func, text
 from sqlalchemy.sql import text
 import structlog
@@ -1216,6 +1217,115 @@ class AIManager:
                         bot_id=bot_id,
                         error=str(e))
             return {}
+
+    # ===== VECTOR STORES MANAGEMENT =====
+    
+    @staticmethod
+    async def save_vector_store_ids(bot_id: str, vector_store_ids: List[str]) -> bool:
+        """Сохранение vector store IDs для бота"""
+        from database.models import UserBot
+        
+        try:
+            async with get_db_session() as session:
+                # Получаем текущие настройки
+                result = await session.execute(
+                    select(UserBot.openai_settings)
+                    .where(UserBot.bot_id == bot_id, UserBot.ai_assistant_type == 'openai')
+                )
+                current_settings = result.scalar_one_or_none() or {}
+                
+                # Обновляем с vector store IDs
+                updated_settings = current_settings.copy()
+                updated_settings['vector_store_ids'] = vector_store_ids
+                updated_settings['enable_file_search'] = True if vector_store_ids else False
+                updated_settings['vector_stores_updated_at'] = datetime.now().isoformat()
+                
+                await session.execute(
+                    update(UserBot)
+                    .where(UserBot.bot_id == bot_id, UserBot.ai_assistant_type == 'openai')
+                    .values(
+                        openai_settings=updated_settings,
+                        updated_at=datetime.now()
+                    )
+                )
+                await session.commit()
+                
+                logger.info("✅ Vector store IDs saved", 
+                           bot_id=bot_id,
+                           vector_store_count=len(vector_store_ids))
+                return True
+                
+        except Exception as e:
+            logger.error("💥 Failed to save vector store IDs", 
+                        bot_id=bot_id, error=str(e))
+            return False
+    
+    @staticmethod
+    async def get_vector_store_info(bot_id: str) -> Dict:
+        """Получение информации о vector stores бота"""
+        from database.models import UserBot
+        
+        try:
+            async with get_db_session() as session:
+                result = await session.execute(
+                    select(UserBot.openai_settings)
+                    .where(UserBot.bot_id == bot_id, UserBot.ai_assistant_type == 'openai')
+                )
+                settings = result.scalar_one_or_none() or {}
+                
+                vector_store_ids = settings.get('vector_store_ids', [])
+                file_search_enabled = settings.get('enable_file_search', False)
+                
+                return {
+                    'vector_store_ids': vector_store_ids,
+                    'file_search_enabled': file_search_enabled,
+                    'vector_stores_count': len(vector_store_ids),
+                    'last_updated': settings.get('vector_stores_updated_at'),
+                    'settings': settings
+                }
+                
+        except Exception as e:
+            logger.error("💥 Failed to get vector store info", 
+                        bot_id=bot_id, error=str(e))
+            return {}
+    
+    @staticmethod
+    async def clear_vector_stores(bot_id: str) -> bool:
+        """Очистка всех vector stores для бота"""
+        from database.models import UserBot
+        
+        try:
+            async with get_db_session() as session:
+                # Получаем текущие настройки
+                result = await session.execute(
+                    select(UserBot.openai_settings)
+                    .where(UserBot.bot_id == bot_id, UserBot.ai_assistant_type == 'openai')
+                )
+                current_settings = result.scalar_one_or_none() or {}
+                
+                # Очищаем vector store данные
+                updated_settings = current_settings.copy()
+                updated_settings['vector_store_ids'] = []
+                updated_settings['enable_file_search'] = False
+                updated_settings['vector_stores_cleared_at'] = datetime.now().isoformat()
+                
+                await session.execute(
+                    update(UserBot)
+                    .where(UserBot.bot_id == bot_id, UserBot.ai_assistant_type == 'openai')
+                    .values(
+                        openai_settings=updated_settings,
+                        updated_at=datetime.now()
+                    )
+                )
+                await session.commit()
+                
+                logger.info("✅ Vector stores cleared", bot_id=bot_id)
+                return True
+                
+        except Exception as e:
+            logger.error("💥 Failed to clear vector stores", 
+                        bot_id=bot_id, error=str(e))
+            return False
 
     # ===== LEGACY COMPATIBILITY METHODS =====
 
