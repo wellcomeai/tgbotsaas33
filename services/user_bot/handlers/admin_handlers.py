@@ -816,6 +816,7 @@ class AdminHandler:
             
             keyboard_buttons = [
                 [InlineKeyboardButton(text="🧪 Протестировать агента", callback_data="test_openai_agent")],
+                [InlineKeyboardButton(text="📚 База знаний", callback_data="openai_upload_files")],
                 [InlineKeyboardButton(text="⚙️ Настроить агента", callback_data="configure_openai_agent")],
                 [InlineKeyboardButton(text="📊 Лимит сообщений", callback_data="ai_message_limit")],  # ✅ НОВОЕ
                 [InlineKeyboardButton(text="🗑️ Удалить агента", callback_data="delete_openai_agent")],
