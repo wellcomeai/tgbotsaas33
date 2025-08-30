@@ -9,6 +9,7 @@ OpenAI Responses Client
 ✅ НОВОЕ: Методы для работы с vector stores
 ✅ ИСПРАВЛЕНО: Vector stores теперь работают БЕЗ .beta (новый OpenAI SDK)
 ✅ ИСПРАВЛЕНО: Убран aiofiles, исправлены RuntimeWarning с coroutines
+✅ ДОБАВЛЕНО: Методы очистки vector store и удаления файлов
 """
 
 import os
@@ -40,6 +41,7 @@ class OpenAIResponsesClient:
     ✅ ИСПРАВЛЕНО: Правильная обработка usage данных без return_usage
     ✅ НОВОЕ: Поддержка vector stores для работы с файлами
     ✅ ИСПРАВЛЕНО: Vector stores работают БЕЗ .beta (новый SDK)
+    ✅ ДОБАВЛЕНО: Методы очистки vector store и удаления файлов
     Автоматическое управление контекстом + встроенные инструменты
     """
     
@@ -1125,6 +1127,76 @@ class OpenAIResponsesClient:
             
         except Exception as e:
             logger.error("💥 Failed to delete vector store", error=str(e))
+            return False, str(e)
+
+    async def clear_vector_store_files(self, vector_store_id: str) -> bool:
+        """✅ НОВЫЙ: Очистка всех файлов из vector store (БЕЗ удаления самого store)"""
+        try:
+            if not self._is_configured():
+                logger.error("❌ OpenAI client not configured")
+                return False
+            
+            logger.info("🧹 Clearing files from vector store", vector_store_id=vector_store_id)
+            
+            # 1. Получаем список всех файлов в vector store
+            files_response = await self.client.vector_stores.files.list(vector_store_id)
+            files_count = len(files_response.data)
+            
+            if files_count == 0:
+                logger.info("ℹ️ Vector store already empty", vector_store_id=vector_store_id)
+                return True
+            
+            logger.info("🔍 Found files in vector store", 
+                       vector_store_id=vector_store_id,
+                       files_count=files_count)
+            
+            # 2. Удаляем каждый файл из vector store
+            removed_count = 0
+            for file in files_response.data:
+                try:
+                    await self.client.vector_stores.files.delete(
+                        vector_store_id=vector_store_id, 
+                        file_id=file.id
+                    )
+                    removed_count += 1
+                    logger.debug("🗑️ File removed from vector store", 
+                               file_id=file.id,
+                               vector_store_id=vector_store_id)
+                except Exception as e:
+                    logger.error("💥 Failed to remove file from vector store", 
+                               file_id=file.id,
+                               vector_store_id=vector_store_id,
+                               error=str(e))
+            
+            logger.info("✅ Vector store files cleared", 
+                       vector_store_id=vector_store_id,
+                       total_files=files_count,
+                       removed_files=removed_count)
+            
+            return removed_count > 0 or files_count == 0
+            
+        except Exception as e:
+            logger.error("💥 Failed to clear vector store files", 
+                        vector_store_id=vector_store_id,
+                        error=str(e))
+            return False
+
+    async def delete_file(self, file_id: str) -> tuple[bool, str]:
+        """✅ НОВЫЙ: Удаление файла из OpenAI Files storage"""
+        try:
+            if not self._is_configured():
+                return False, "OpenAI client not configured"
+            
+            logger.info("🗑️ Deleting file from OpenAI Files", file_id=file_id)
+            
+            await self.client.files.delete(file_id)
+            
+            logger.info("✅ File deleted from OpenAI Files", file_id=file_id)
+            return True, "File deleted successfully"
+            
+        except Exception as e:
+            logger.error("💥 Failed to delete file from OpenAI Files", 
+                        file_id=file_id, error=str(e))
             return False, str(e)
 
     def _safe_extract_file_counts(self, file_counts) -> dict:
