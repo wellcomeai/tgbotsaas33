@@ -447,8 +447,8 @@ class ChannelHandler:
                        user_id=user.id,
                        chat_id=message.chat.id)
             
-            # Убираем кнопку приветствия
-            await message.answer("⏳ Обрабатываем ваш ответ...", reply_markup=ReplyKeyboardRemove())
+            
+        
             
             # Запускаем воронку
             await self._start_user_funnel(user)
