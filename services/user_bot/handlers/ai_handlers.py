@@ -866,7 +866,7 @@ class AIHandler:
                 logger.info("🎤 Admin voice message received, transcribing...", user_id=message.from_user.id)
                 
                 await message.bot.send_chat_action(message.chat.id, "typing")
-                
+                thinking_msg = await message.answer("💭")
                 message_text = await self._transcribe_voice_message(message.voice)
                 
                 if not message_text:
