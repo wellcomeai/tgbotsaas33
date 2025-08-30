@@ -1332,7 +1332,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
         # Callback'ы управления файлами
         dp.callback_query.register(
             ai_handler.handle_file_management_callbacks,
-            F.data.in_(["openai_start_upload", "openai_finish_upload", "openai_manage_files"]),
+            F.data.in_(["openai_start_upload", "openai_finish_upload", "openai_manage_files","openai_upload_files"]),
             F.from_user.id == owner_user_id
         )
         
