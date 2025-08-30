@@ -263,7 +263,8 @@ class AIHandler:
                 await openai_handler.handle_finish_upload(callback, state, is_owner_check)
             elif callback.data == "openai_manage_files":
                 await openai_handler.handle_manage_files(callback, is_owner_check)
-            
+            elif callback.data == "openai_upload_files":
+                await openai_handler.handle_upload_files(callback, is_owner_check)
             logger.info("✅ File management callback handled", callback_data=callback.data)
             
         except Exception as e:
