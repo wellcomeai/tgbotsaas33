@@ -409,24 +409,12 @@ class AdminKeyboards:
 
     @staticmethod
     def mass_broadcast_main_menu() -> InlineKeyboardMarkup:
-        """Главное меню массовых рассылок"""
+        """Главное меню массовых рассылок - ОБНОВЛЕНО: убраны кнопки запланированных рассылок"""
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🚀 Мгновенная рассылка", 
                     callback_data="mass_broadcast_instant"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⏰ Запланировать рассылку", 
-                    callback_data="mass_broadcast_scheduled"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Запланированные рассылки", 
-                    callback_data="mass_broadcast_list_scheduled"
                 )
             ],
             [
