@@ -1067,7 +1067,7 @@ class AIHandler:
             
             # Показываем индикатор набора
             await message.bot.send_chat_action(message.chat.id, "typing")
-            
+            thinking_msg = await message.answer("💭")
             # ✅ ИСПРАВЛЕНО: Получаем ответ от ИИ с транскрибированным текстом
             ai_response = await self._get_openai_response_for_user_with_text(message, user.id, message_text)
             
