@@ -1196,7 +1196,7 @@ class AIHandler:
             
             # Показываем typing
             await message.bot.send_chat_action(message.chat.id, "typing")
-            
+            thinking_msg = await message.answer("💭")
             # Очищаем упоминание из текста
             clean_text = self._remove_bot_mention(message.text, self.bot_config['bot_username'])
             
