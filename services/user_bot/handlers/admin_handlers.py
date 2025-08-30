@@ -2098,11 +2098,10 @@ async def show_mass_broadcast_main_menu(callback: CallbackQuery, bot_id: str, bo
         
         text = f"""
 📨 <b>Массовые рассылки @{bot_username}</b>
-
+      <b>В этом разделе вы можете создать и отправить рассылку по всем активным участникам бота.</b>
 📊 <b>Статистика за 30 дней:</b>
    Отправлено рассылок: {stats.get('total_broadcasts', 0)}
    Мгновенных: {stats.get('by_type', {}).get('instant', 0)}
-   Запланированных: {stats.get('by_type', {}).get('scheduled', 0)}
    
 📈 <b>Доставка:</b>
    Успешно доставлено: {stats.get('deliveries', {}).get('successful', 0)}
