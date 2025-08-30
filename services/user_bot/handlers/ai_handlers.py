@@ -1,5 +1,5 @@
 """
-AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ + ПОДДЕРЖКА ГРУППОВЫХ УПОМИНАНИЙ + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ
+AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ + ПОДДЕРЖКА ГРУППОВЫХ УПОМИНАНИЙ + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ + АНИМИРОВАННЫЕ ТОЧКИ
 ✅ АДМИН: Настройка и управление ИИ агентами  
 ✅ ПОЛЬЗОВАТЕЛИ: Обработка диалогов с ИИ (БЕЗ показа кнопки - это в channel_handlers)
 ✅ ЧИСТОЕ РАЗДЕЛЕНИЕ: channel_handlers показывает кнопку, ai_handlers её обрабатывает
@@ -16,6 +16,7 @@ AI обработчики для UserBot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 ✅ НОВОЕ: Обработка упоминаний бота в группах (@botname сообщение)
 ✅ НОВОЕ: Контроль доступа владельца через access_control
 ✅ НОВОЕ: Полная поддержка управления файлами для OpenAI агентов
+✅ НОВОЕ: Анимированные точки с обновлением typing статуса
 """
 
 import asyncio
@@ -833,7 +834,7 @@ class AIHandler:
             await message.answer("❌ Произошла ошибка")
 
     async def handle_admin_ai_conversation(self, message: Message, state: FSMContext):
-        """Обработка админского тестирования ИИ - С ПОДДЕРЖКОЙ ГОЛОСОВЫХ БЕЗ FROZEN ERROR + КОНТРОЛЬ ДОСТУПА"""
+        """Обработка админского тестирования ИИ - С АНИМИРОВАННЫМИ ТОЧКАМИ + ПОДДЕРЖКОЙ ГОЛОСОВЫХ БЕЗ FROZEN ERROR + КОНТРОЛЬ ДОСТУПА"""
         logger.info("💬 Admin AI testing conversation", user_id=message.from_user.id)
         
         try:
@@ -865,9 +866,29 @@ class AIHandler:
             if message.voice:
                 logger.info("🎤 Admin voice message received, transcribing...", user_id=message.from_user.id)
                 
+                # ✅ НОВОЕ: Анимированные точки для транскрибирования голосовых
                 await message.bot.send_chat_action(message.chat.id, "typing")
-                thinking_msg = await message.answer("💭")
-                message_text = await self._transcribe_voice_message(message.voice)
+                thinking_msg = await message.answer("🎤 Распознаю голос.")
+                
+                try:
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")
+                    await thinking_msg.edit_text("🎤 Распознаю голос..")
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")
+                    await thinking_msg.edit_text("🎤 Распознаю голос...")
+                    
+                    message_text = await self._transcribe_voice_message(message.voice)
+                    
+                    # Удаляем анимацию транскрибирования
+                    await thinking_msg.delete()
+                except Exception as e:
+                    # Удаляем анимацию даже при ошибке
+                    try:
+                        await thinking_msg.delete()
+                    except:
+                        pass
+                    raise e
                 
                 if not message_text:
                     await message.answer("❌ Не удалось распознать голосовое сообщение. Попробуйте еще раз или напишите текстом.")
@@ -891,10 +912,30 @@ class AIHandler:
             agent_type = data.get('agent_type', 'openai')
             
             if agent_type == 'openai':
+                # ✅ НОВОЕ: Показываем typing и анимированные точки
                 await message.bot.send_chat_action(message.chat.id, "typing")
+                thinking_msg = await message.answer("💭Готовлю ответ.")
                 
-                # ✅ ИСПРАВЛЕНО: Используем новый метод для админов с кастомным текстом
-                response = await self._get_openai_response_for_admin_with_text(message, message.from_user.id, message_text)
+                try:
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing
+                    await thinking_msg.edit_text("💭Готовлю ответ..")
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing снова
+                    await thinking_msg.edit_text("💭Готовлю ответ...")
+                    
+                    # ✅ ИСПРАВЛЕНО: Используем новый метод для админов с кастомным текстом
+                    response = await self._get_openai_response_for_admin_with_text(message, message.from_user.id, message_text)
+                    
+                    # Удаляем анимацию
+                    await thinking_msg.delete()
+                except Exception as e:
+                    # Удаляем анимацию даже при ошибке
+                    try:
+                        await thinking_msg.delete()
+                    except:
+                        pass
+                    raise e
                 
                 if response:
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1000,7 +1041,7 @@ class AIHandler:
             await message.answer("❌ Произошла ошибка при запуске диалога с ИИ.")
 
     async def handle_user_ai_conversation(self, message: Message, state: FSMContext):
-        """💬 Обработка диалога пользователя с ИИ + распознавание голосовых - ИСПРАВЛЕНО + КОНТРОЛЬ ДОСТУПА"""
+        """💬 Обработка диалога пользователя с ИИ + распознавание голосовых - ИСПРАВЛЕНО + АНИМИРОВАННЫЕ ТОЧКИ + КОНТРОЛЬ ДОСТУПА"""
         user = message.from_user
         
         logger.info("💬 User AI conversation message", 
@@ -1036,9 +1077,29 @@ class AIHandler:
             if message.voice:
                 logger.info("🎤 Voice message received, transcribing...", user_id=user.id)
                 
+                # ✅ НОВОЕ: Анимированные точки для распознавания голосовых
                 await message.bot.send_chat_action(message.chat.id, "typing")
-                
-                message_text = await self._transcribe_voice_message(message.voice)
+                thinking_msg = await message.answer("🎤 Распознаю голос.")
+
+                try:
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")
+                    await thinking_msg.edit_text("🎤 Распознаю голос..")
+                    await asyncio.sleep(1)
+                    await message.bot.send_chat_action(message.chat.id, "typing")
+                    await thinking_msg.edit_text("🎤 Распознаю голос...")
+                    
+                    message_text = await self._transcribe_voice_message(message.voice)
+                    
+                    # Удаляем анимацию транскрибирования
+                    await thinking_msg.delete()
+                except Exception as e:
+                    # Удаляем анимацию даже при ошибке
+                    try:
+                        await thinking_msg.delete()
+                    except:
+                        pass
+                    raise e
                 
                 if not message_text:
                     await message.answer("❌ Не удалось распознать голосовое сообщение. Попробуйте еще раз или напишите текстом.")
@@ -1065,11 +1126,30 @@ class AIHandler:
                 await state.clear()
                 return
             
-            # Показываем индикатор набора
+            # ✅ НОВОЕ: Показываем typing и анимированные точки
             await message.bot.send_chat_action(message.chat.id, "typing")
-            thinking_msg = await message.answer("💭")
-            # ✅ ИСПРАВЛЕНО: Получаем ответ от ИИ с транскрибированным текстом
-            ai_response = await self._get_openai_response_for_user_with_text(message, user.id, message_text)
+            thinking_msg = await message.answer("💭Готовлю ответ.")
+
+            try:
+                await asyncio.sleep(1)
+                await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing
+                await thinking_msg.edit_text("💭Готовлю ответ..")
+                await asyncio.sleep(1)
+                await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing снова
+                await thinking_msg.edit_text("💭Готовлю ответ...")
+                
+                # ✅ ИСПРАВЛЕНО: Получаем ответ от ИИ с транскрибированным текстом
+                ai_response = await self._get_openai_response_for_user_with_text(message, user.id, message_text)
+                
+                # Удаляем анимацию
+                await thinking_msg.delete()
+            except Exception as e:
+                # Удаляем анимацию даже при ошибке
+                try:
+                    await thinking_msg.delete()
+                except:
+                    pass
+                raise e
             
             if ai_response:
                 # Увеличиваем счетчик
@@ -1165,7 +1245,7 @@ class AIHandler:
     # ===== НОВЫЙ ГРУППОВОЙ ОБРАБОТЧИК =====
 
     async def handle_group_mention(self, message: Message):
-        """🏷️ Обработка упоминания бота в группе - ответ через ИИ + КОНТРОЛЬ ДОСТУПА"""
+        """🏷️ Обработка упоминания бота в группе - ответ через ИИ + АНИМИРОВАННЫЕ ТОЧКИ + КОНТРОЛЬ ДОСТУПА"""
         user = message.from_user
         
         logger.info("🏷️ Bot mentioned in group", 
@@ -1194,18 +1274,37 @@ class AIHandler:
                 await message.reply("❌ ИИ агент недоступен.")
                 return
             
-            # Показываем typing
-            await message.bot.send_chat_action(message.chat.id, "typing")
-            thinking_msg = await message.answer("💭")
             # Очищаем упоминание из текста
             clean_text = self._remove_bot_mention(message.text, self.bot_config['bot_username'])
             
             if not clean_text.strip():
                 await message.reply("👋 Привет! О чём хотите поговорить?")
                 return
-            
-            # Получаем ответ от ИИ
-            ai_response = await self._get_openai_response_for_user_with_text(message, user.id, clean_text)
+
+            # ✅ НОВОЕ: Показываем typing и анимированные точки
+            await message.bot.send_chat_action(message.chat.id, "typing")
+            thinking_msg = await message.answer("💭Готовлю ответ.")
+
+            try:
+                await asyncio.sleep(1)
+                await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing
+                await thinking_msg.edit_text("💭Готовлю ответ..")
+                await asyncio.sleep(1)
+                await message.bot.send_chat_action(message.chat.id, "typing")  # Обновляем typing снова
+                await thinking_msg.edit_text("💭Готовлю ответ...")
+                
+                # Получаем ответ от ИИ
+                ai_response = await self._get_openai_response_for_user_with_text(message, user.id, clean_text)
+                
+                # Удаляем анимацию
+                await thinking_msg.delete()
+            except Exception as e:
+                # Удаляем анимацию даже при ошибке
+                try:
+                    await thinking_msg.delete()
+                except:
+                    pass
+                raise e
             
             if ai_response:
                 # Отвечаем в той же группе
@@ -1240,7 +1339,7 @@ def _is_bot_mentioned(message: Message, bot_username: str) -> bool:
 
 
 def register_ai_handlers(dp: Dispatcher, **kwargs):
-    """✅ ИСПРАВЛЕННАЯ РЕГИСТРАЦИЯ с поддержкой групповых упоминаний + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ"""
+    """✅ ИСПРАВЛЕННАЯ РЕГИСТРАЦИЯ с поддержкой групповых упоминаний + КОНТРОЛЬ ДОСТУПА + УПРАВЛЕНИЕ ФАЙЛАМИ + АНИМИРОВАННЫЕ ТОЧКИ"""
     
     # Создаем экземпляр обработчика
     ai_handler = AIHandler(
@@ -1253,7 +1352,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
     owner_user_id = ai_handler.owner_user_id
     
     try:
-        logger.info("🎯 Registering AI handlers with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT", 
+        logger.info("🎯 Registering AI handlers with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT + ANIMATED DOTS", 
                    bot_id=ai_handler.bot_id,
                    owner_user_id=owner_user_id,
                    new_features=[
@@ -1262,7 +1361,8 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                        "Enhanced voice transcription diagnostics",
                        "Complete voice support for admins and users",
                        "Owner access control integration",
-                       "File management for OpenAI agents"
+                       "File management for OpenAI agents",
+                       "Animated thinking dots with typing status updates"
                    ])
         
         # ===== 🏆 АДМИНСКИЕ ИИ ОБРАБОТЧИКИ (ТОЛЬКО ВЛАДЕЛЕЦ) =====
@@ -1396,7 +1496,7 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
             lambda message: _is_bot_mentioned(message, kwargs['bot_config']['bot_username'])
         )
         
-        logger.info("✅ AI handlers registered with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT", 
+        logger.info("✅ AI handlers registered with GROUP MENTIONS + VOICE + ACCESS CONTROL + FILE MANAGEMENT + ANIMATED DOTS", 
                    owner_user_id=owner_user_id,
                    admin_handlers=8,  
                    user_handlers=5,
@@ -1412,7 +1512,9 @@ def register_ai_handlers(dp: Dispatcher, **kwargs):
                        "New _get_openai_response_for_admin_with_text method for admin voice messages",
                        "GROUP MENTIONS SUPPORT: @botname message triggers AI response in groups",
                        "OWNER ACCESS CONTROL: All AI handlers check owner access before processing",
-                       "FILE MANAGEMENT: Complete file upload/management support for OpenAI agents"
+                       "FILE MANAGEMENT: Complete file upload/management support for OpenAI agents",
+                       "ANIMATED THINKING DOTS: '💭Готовлю ответ.' -> '..' -> '...' with typing status updates",
+                       "PROPER ANIMATION CLEANUP: Delete thinking messages after response or on error"
                    ])
         
     except Exception as e:
