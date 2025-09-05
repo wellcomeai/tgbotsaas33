@@ -616,7 +616,8 @@ class BotFactory:
                 # OutSum:InvId:Password#2[:Shp_item1=value1:Shp_item2=value2:...]
                 # ✅ Shp параметры в АЛФАВИТНОМ порядке: bot_id перед user_id
                 
-                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                # ✅ ТЕСТ: Убираем Shp_bot_id (как в master bot)
+                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
                 logger.info("🔍 Bot-specific signature verification (CORRECT WEBHOOK FORMAT)", 
