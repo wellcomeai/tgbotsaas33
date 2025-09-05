@@ -564,49 +564,29 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """🔍 ОТЛАДОЧНАЯ версия - принимаем ВСЕ webhook'и от Robokassa"""
+        """✅ ФИНАЛЬНО ИСПРАВЛЕНО: Обработка платежа с ПРАВИЛЬНЫМИ форматами Robokassa"""
         try:
-            import hashlib
             from datetime import datetime, timedelta
             from sqlalchemy import text
             
-            # ✅ ПОЛНАЯ ДИАГНОСТИКА: Логируем ВСЕ что прислала Robokassa
-            logger.info("=" * 80)
-            logger.info("🔍 ROBOKASSA WEBHOOK DEBUG - ПОЛНЫЕ ДАННЫЕ")
-            logger.info("=" * 80)
-            
-            # Логируем все параметры
-            logger.info("📋 ВСЕ параметры webhook:", 
-                       raw_data=dict(data),
-                       total_params=len(data),
-                       sorted_keys=sorted(data.keys()))
-            
-            # Извлекаем основные параметры
-            signature_value = data.get('SignatureValue', '')
+            # Извлекаем параметры
+            signature_value = data.get('SignatureValue', '').upper()
             out_sum_raw = data.get('OutSum', '')
             inv_id = data.get('InvId', '')
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
             
-            logger.info("📊 ОСНОВНЫЕ параметры:", 
-                       SignatureValue=signature_value,
-                       OutSum=out_sum_raw,
-                       InvId=inv_id,
-                       Shp_user_id=shp_user_id,
-                       Shp_bot_id=shp_bot_id)
+            # Проверяем обязательные параметры
+            if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
+                logger.error("❌ Missing required parameters for bot payment", 
+                           signature_value=bool(signature_value),
+                           out_sum=bool(out_sum_raw),
+                           inv_id=bool(inv_id),
+                           shp_user_id=bool(shp_user_id),
+                           shp_bot_id=bool(shp_bot_id))
+                return web.Response(text="ERROR: Missing required parameters", status=400)
             
-            # Логируем ВСЕ Shp параметры отдельно
-            shp_params = {}
-            for key, value in data.items():
-                if key.startswith('Shp_'):
-                    shp_params[key] = value
-            
-            logger.info("🏷️ ВСЕ Shp параметры:", 
-                       shp_params=shp_params,
-                       shp_count=len(shp_params),
-                       shp_keys_sorted=sorted(shp_params.keys()))
-            
-            # Получаем настройки бота
+            # ✅ Получаем настройки бота из БД
             try:
                 from database.connection import get_db_session
                 
@@ -619,109 +599,76 @@ class BotFactory:
                     bot_settings = result.fetchone()
                     
                     if not bot_settings:
-                        logger.error("❌ Bot settings not found", bot_id=bot_id)
-                        # ✅ ВСЕ РАВНО ВОЗВРАЩАЕМ OK для отладки
-                        return web.Response(text=f"OK{inv_id}")
-                    
-                    logger.info("⚙️ НАСТРОЙКИ бота:", 
-                               merchant_login=bot_settings.robokassa_merchant_login,
-                               password1_preview=bot_settings.robokassa_password1[:5] + "***",
-                               password2_preview=bot_settings.robokassa_password2[:5] + "***",
-                               password1_length=len(bot_settings.robokassa_password1),
-                               password2_length=len(bot_settings.robokassa_password2))
+                        logger.error("❌ Bot payment settings not found", bot_id=bot_id)
+                        return web.Response(text="ERROR: Bot settings not found", status=400)
                     
             except Exception as db_error:
-                logger.error("💥 Database error", error=str(db_error))
-                # ✅ ВСЕ РАВНО ВОЗВРАЩАЕМ OK для отладки
-                return web.Response(text=f"OK{inv_id}")
+                logger.error("💥 Database error getting bot settings", 
+                           bot_id=bot_id,
+                           error=str(db_error))
+                return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ ТЕСТИРУЕМ РЕКОНСТРУКЦИЮ подписи вручную
-            password2 = bot_settings.robokassa_password2
-            
-            # Собираем Shp параметры в правильном порядке
-            shp_sorted = []
-            for key in sorted(shp_params.keys()):
-                shp_sorted.append(f"{key}={shp_params[key]}")
-            
-            shp_string = ":".join(shp_sorted) if shp_sorted else ""
-            
-            # Тестируем разные варианты
-            test_signatures = []
-            
-            # Вариант 1: OutSum:InvId:Password2:Shp_params
-            if shp_string:
-                variant1 = f"{out_sum_raw}:{inv_id}:{password2}:{shp_string}"
-            else:
-                variant1 = f"{out_sum_raw}:{inv_id}:{password2}"
-            test_signatures.append(("Стандартный с Shp", variant1))
-            
-            # Вариант 2: Без Shp
-            variant2 = f"{out_sum_raw}:{inv_id}:{password2}"
-            test_signatures.append(("Без Shp параметров", variant2))
-            
-            # Вариант 3: С merchant
-            if shp_string:
-                variant3 = f"{bot_settings.robokassa_merchant_login}:{out_sum_raw}:{inv_id}:{password2}:{shp_string}"
-            else:
-                variant3 = f"{bot_settings.robokassa_merchant_login}:{out_sum_raw}:{inv_id}:{password2}"
-            test_signatures.append(("С Merchant Login", variant3))
-            
-            # Вариант 4: Password1 вместо Password2
-            if shp_string:
-                variant4 = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password1}:{shp_string}"
-            else:
-                variant4 = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password1}"
-            test_signatures.append(("Password1 вместо Password2", variant4))
-            
-            # Вариант 5: Нормализованная сумма
-            normalized_sum = str(float(out_sum_raw))
-            if shp_string:
-                variant5 = f"{normalized_sum}:{inv_id}:{password2}:{shp_string}"
-            else:
-                variant5 = f"{normalized_sum}:{inv_id}:{password2}"
-            test_signatures.append(("Нормализованная сумма", variant5))
-            
-            # Логируем все тесты
-            logger.info("🧪 ТЕСТИРОВАНИЕ подписей:")
-            for i, (desc, sig_string) in enumerate(test_signatures, 1):
-                calculated_hash = hashlib.md5(sig_string.encode('utf-8')).hexdigest().upper()
-                is_match = signature_value.upper() == calculated_hash
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Правильный формат webhook подписи
+            try:
+                import hashlib
                 
-                logger.info(f"🧪 ТЕСТ {i}: {desc}", 
-                           signature_string=sig_string,
-                           calculated_hash=calculated_hash,
-                           received_hash=signature_value.upper(),
-                           match=is_match,
-                           match_symbol="✅" if is_match else "❌")
+                # ✅ ROBOKASSA WEBHOOK (Result URL) FORMAT:
+                # OutSum:InvId:Password#2[:Shp_item1=value1:Shp_item2=value2:...]
+                # ✅ Shp параметры в АЛФАВИТНОМ порядке: bot_id перед user_id
+                
+                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
+                
+                logger.info("🔍 Bot-specific signature verification (CORRECT WEBHOOK FORMAT)", 
+                           bot_id=bot_id,
+                           signature_string=signature_string,
+                           received_signature=signature_value,
+                           expected_signature=expected_signature,
+                           match=signature_value == expected_signature,
+                           out_sum_raw=out_sum_raw,
+                           webhook_format_used=True,
+                           password2_length=len(bot_settings.robokassa_password2))
+                
+                if signature_value != expected_signature:
+                    logger.error("❌ Invalid bot-specific signature (WEBHOOK FORMAT)", 
+                               bot_id=bot_id,
+                               received=signature_value,
+                               expected=expected_signature,
+                               out_sum_raw=out_sum_raw,
+                               inv_id=inv_id,
+                               shp_bot_id=shp_bot_id,
+                               shp_user_id=shp_user_id,
+                               signature_string=signature_string,
+                               format_used="webhook_result_url",
+                               password_used="password2")
+                    return web.Response(text="ERROR: Invalid signature", status=400)
+                
+                logger.info("✅ Bot-specific signature verified successfully (WEBHOOK FORMAT)", 
+                           bot_id=bot_id,
+                           out_sum_raw=out_sum_raw)
+                
+            except Exception as sig_error:
+                logger.error("💥 Signature verification failed", 
+                           bot_id=bot_id,
+                           error=str(sig_error))
+                return web.Response(text="ERROR: Signature verification failed", status=500)
             
-            # ✅ ПОКАЗЫВАЕМ ВСЕ ОСТАЛЬНЫЕ ПАРАМЕТРЫ
-            other_params = {}
-            for key, value in data.items():
-                if key not in ['SignatureValue', 'OutSum', 'InvId'] and not key.startswith('Shp_'):
-                    other_params[key] = value
-            
-            if other_params:
-                logger.info("📋 ДРУГИЕ параметры:", other_params=other_params)
-            
-            # ✅ ВАЖНО: Логируем точный формат, который ВОЗМОЖНО использует Robokassa
-            logger.info("💡 ВОЗМОЖНЫЕ ФОРМАТЫ для ручной проверки:")
-            logger.info("1. Только основные:", f"{out_sum_raw}:{inv_id}:{password2}")
-            logger.info("2. Все параметры в алфавитном порядке:", 
-                       all_params_sorted=":".join([f"{k}={v}" for k, v in sorted(data.items()) if k != 'SignatureValue']))
-            
-            # ✅ ПРИНИМАЕМ ПЛАТЕЖ ДЛЯ ОТЛАДКИ (убираем проверку подписи)
+            # Получаем user_id
             try:
                 user_id = int(shp_user_id)
             except ValueError:
-                logger.error("❌ Invalid user_id", shp_user_id=shp_user_id)
-                return web.Response(text=f"OK{inv_id}")  # Все равно OK для отладки
+                logger.error("❌ Invalid user_id format", shp_user_id=shp_user_id)
+                return web.Response(text="ERROR: Invalid user_id format", status=400)
             
-            # Сохраняем подписчика
+            # Рассчитываем дату окончания подписки
+            subscription_start = datetime.now()
+            subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
+            
+            # ✅ Используем RAW сумму для сохранения
+            payment_amount = float(out_sum_raw)
+            
+            # Сохраняем подписчика в БД
             try:
-                subscription_start = datetime.now()
-                subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
-                payment_amount = float(out_sum_raw)
-                
                 await self._save_paid_subscriber(
                     bot_id=bot_id,
                     user_id=user_id,
@@ -732,32 +679,47 @@ class BotFactory:
                     channel_id=bot_settings.target_channel_id
                 )
                 
-                logger.info("✅ ОТЛАДКА: Подписчик сохранен БЕЗ проверки подписи", 
+                logger.info("✅ Paid subscriber saved (WEBHOOK FORMAT)", 
                            bot_id=bot_id,
                            user_id=user_id,
-                           amount=payment_amount)
+                           amount=payment_amount,
+                           subscription_end=subscription_end)
                 
-                # Добавляем в канал
-                await self._add_user_to_paid_channel(
+            except Exception as save_error:
+                logger.error("💥 Failed to save paid subscriber", 
+                           bot_id=bot_id,
+                           user_id=user_id,
+                           error=str(save_error))
+                return web.Response(text="ERROR: Failed to save subscription", status=500)
+            
+            # Добавляем пользователя в платный канал
+            try:
+                success = await self._add_user_to_paid_channel(
                     bot_id=bot_id,
                     user_id=user_id,
                     channel_id=bot_settings.target_channel_id,
                     subscription_end=subscription_end
                 )
                 
-            except Exception as save_error:
-                logger.error("💥 Ошибка сохранения", error=str(save_error))
+                if success:
+                    logger.info("✅ User added to paid channel", 
+                               bot_id=bot_id,
+                               user_id=user_id,
+                               channel_id=bot_settings.target_channel_id)
+                
+            except Exception as channel_error:
+                logger.error("💥 Error adding user to channel", 
+                           bot_id=bot_id,
+                           user_id=user_id,
+                           error=str(channel_error))
             
-            logger.info("=" * 80)
-            logger.info("🎯 ОТЛАДКА ЗАВЕРШЕНА - возвращаем OK")
-            logger.info("=" * 80)
-            
-            # ✅ ВСЕГДА возвращаем OK для отладки
             return web.Response(text=f"OK{inv_id}")
             
         except Exception as e:
-            logger.error("💥 Ошибка в отладочном webhook", error=str(e), exc_info=True)
-            return web.Response(text="OK", status=200)  # Даже при ошибке OK для отладки
+            logger.error("💥 Failed to handle bot specific payment", 
+                       bot_id=bot_id,
+                       error=str(e))
+            return web.Response(text="ERROR", status=500)
 
     async def _save_paid_subscriber(self, bot_id: str, user_id: int, payment_amount: float, 
                                    invoice_id: str, subscription_start: datetime, 
