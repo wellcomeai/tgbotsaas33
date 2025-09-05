@@ -564,8 +564,14 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """✅ ФИНАЛЬНО ИСПРАВЛЕНО: Обработка платежа с ПРАВИЛЬНЫМИ форматами Robokassa"""
+        """Обработка платежа с ПОЛНЫМ логированием"""
         try:
+            # ✅ ПОЛНОЕ ЛОГИРОВАНИЕ ВСЕХ ДАННЫХ ОТ ROBOKASSA
+            logger.info("🔍 FULL ROBOKASSA WEBHOOK DATA", 
+                       all_data=dict(data),
+                       data_keys=list(data.keys()),
+                       bot_id=bot_id)
+            
             from datetime import datetime, timedelta
             from sqlalchemy import text
             
