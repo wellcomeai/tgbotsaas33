@@ -571,22 +571,29 @@ class BotFactory:
             
             # Извлекаем параметры
             signature_value = data.get('SignatureValue', '').upper()
-            out_sum = data.get('OutSum', '')
+            out_sum_raw = data.get('OutSum', '')
             inv_id = data.get('InvId', '')
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
             
+            # ✅ ИСПРАВЛЕНО: Форматируем сумму правильно (2 знака после запятой)
+            try:
+                formatted_sum = f"{float(out_sum_raw):.2f}"
+            except (ValueError, TypeError):
+                logger.error("❌ Invalid OutSum format", out_sum=out_sum_raw)
+                return web.Response(text="ERROR: Invalid OutSum format", status=400)
+            
             # Проверяем обязательные параметры
-            if not all([signature_value, out_sum, inv_id, shp_user_id, shp_bot_id]):
+            if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
                 logger.error("❌ Missing required parameters for bot payment", 
                            signature_value=bool(signature_value),
-                           out_sum=bool(out_sum),
+                           out_sum=bool(out_sum_raw),
                            inv_id=bool(inv_id),
                            shp_user_id=bool(shp_user_id),
                            shp_bot_id=bool(shp_bot_id))
                 return web.Response(text="ERROR: Missing required parameters", status=400)
             
-            # ✅ ИСПРАВЛЕНО: Получаем настройки бота из БД
+            # ✅ Получаем настройки бота из БД
             try:
                 from database.connection import get_db_session
                 
@@ -616,35 +623,40 @@ class BotFactory:
                            exc_info=True)
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ ИСПРАВЛЕНО: Проверяем подпись с ПРАВИЛЬНЫМ паролем и порядком
+            # ✅ ИСПРАВЛЕНО: Проверяем подпись с правильными параметрами
             try:
                 import hashlib
                 
                 # ✅ ПРАВИЛЬНО: Для Result URL используется password2
-                # ✅ ПРАВИЛЬНО: Порядок параметров как в Robokassa документации
-                signature_string = f"{out_sum}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                # ✅ ПРАВИЛЬНО: Формат для проверки уведомления: OutSum:InvId:Password2:Shp_params...
+                # ✅ ПРАВИЛЬНО: Параметры в алфавитном порядке (Shp_bot_id перед Shp_user_id)
+                signature_string = f"{formatted_sum}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
-                logger.info("🔍 Bot-specific signature verification (FIXED)", 
+                logger.info("🔍 Bot-specific signature verification (FINAL FIX)", 
                            bot_id=bot_id,
                            signature_string=signature_string,
                            received_signature=signature_value,
                            expected_signature=expected_signature,
                            match=signature_value == expected_signature,
+                           formatted_sum=formatted_sum,
+                           raw_sum=out_sum_raw,
                            merchant_login=bot_settings.robokassa_merchant_login,
                            password2_length=len(bot_settings.robokassa_password2))
                 
                 if signature_value != expected_signature:
-                    logger.error("❌ Invalid bot-specific signature (DETAILS)", 
+                    logger.error("❌ Invalid bot-specific signature (FINAL CHECK)", 
                                bot_id=bot_id,
                                received=signature_value,
                                expected=expected_signature,
-                               out_sum=out_sum,
+                               formatted_sum=formatted_sum,
+                               raw_sum=out_sum_raw,
                                inv_id=inv_id,
                                shp_bot_id=shp_bot_id,
                                shp_user_id=shp_user_id,
                                merchant_login=bot_settings.robokassa_merchant_login,
-                               password2_used=bot_settings.robokassa_password2[:5] + "***")
+                               password2_used=bot_settings.robokassa_password2[:5] + "***",
+                               signature_string=signature_string)
                     return web.Response(text="ERROR: Invalid signature", status=400)
                 
                 logger.info("✅ Bot-specific signature verified successfully", 
@@ -674,7 +686,7 @@ class BotFactory:
                 await self._save_paid_subscriber(
                     bot_id=bot_id,
                     user_id=user_id,
-                    payment_amount=float(out_sum),
+                    payment_amount=float(formatted_sum),
                     invoice_id=inv_id,
                     subscription_start=subscription_start,
                     subscription_end=subscription_end,
@@ -684,7 +696,7 @@ class BotFactory:
                 logger.info("✅ Paid subscriber saved", 
                            bot_id=bot_id,
                            user_id=user_id,
-                           amount=out_sum,
+                           amount=formatted_sum,
                            subscription_end=subscription_end)
                 
             except Exception as save_error:
