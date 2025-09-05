@@ -564,17 +564,35 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """✅ ИСПРАВЛЕНО: Обработка платежа конкретного бота - ФИКС ПОДПИСИ"""
+        """✅ ИСПРАВЛЕНО: Обработка платежа с нормализацией суммы"""
         try:
             from datetime import datetime, timedelta
             from sqlalchemy import text
             
             # Извлекаем параметры
             signature_value = data.get('SignatureValue', '').upper()
-            out_sum_raw = data.get('OutSum', '')  # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: НЕ форматируем!
+            out_sum_raw = data.get('OutSum', '')
             inv_id = data.get('InvId', '')
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
+            
+            # ✅ КЛЮЧЕВОЕ ДОБАВЛЕНИЕ: Нормализация суммы
+            def normalize_sum(sum_str: str) -> str:
+                """Нормализует сумму к единому формату"""
+                try:
+                    # Убираем лишние нули: "5.000000" -> "5.0" -> "5"
+                    normalized = str(float(sum_str))
+                    return normalized
+                except ValueError:
+                    return sum_str
+            
+            out_sum_normalized = normalize_sum(out_sum_raw)
+            
+            logger.info("💰 Sum normalization for bot payment", 
+                       bot_id=bot_id,
+                       out_sum_raw=out_sum_raw,
+                       out_sum_normalized=out_sum_normalized,
+                       normalization_applied=out_sum_raw != out_sum_normalized)
             
             # Проверяем обязательные параметры
             if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
@@ -586,7 +604,7 @@ class BotFactory:
                            shp_bot_id=bool(shp_bot_id))
                 return web.Response(text="ERROR: Missing required parameters", status=400)
             
-            # ✅ Получаем настройки бота из БД
+            # Получаем настройки бота из БД
             try:
                 from database.connection import get_db_session
                 
@@ -602,59 +620,43 @@ class BotFactory:
                         logger.error("❌ Bot payment settings not found", bot_id=bot_id)
                         return web.Response(text="ERROR: Bot settings not found", status=400)
                     
-                    logger.info("✅ Bot payment settings loaded", 
-                               bot_id=bot_id,
-                               price=bot_settings.price,
-                               period_days=bot_settings.subscription_period_days,
-                               channel_id=bot_settings.target_channel_id,
-                               merchant_login=bot_settings.robokassa_merchant_login)
-                    
             except Exception as db_error:
                 logger.error("💥 Database error getting bot settings", 
                            bot_id=bot_id,
-                           error=str(db_error),
-                           exc_info=True)
+                           error=str(db_error))
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ ФУНДАМЕНТАЛЬНОЕ ИСПРАВЛЕНИЕ: Проверяем подпись БЕЗ форматирования суммы
+            # ✅ ИСПРАВЛЕНО: Проверяем подпись с НОРМАЛИЗОВАННОЙ суммой
             try:
                 import hashlib
                 
-                # ✅ ПРАВИЛЬНО: Используем out_sum_raw как пришел от Robokassa (без форматирования!)
-                # ✅ ПРАВИЛЬНО: Для Result URL используется password2
-                # ✅ ПРАВИЛЬНО: Формат для проверки уведомления: OutSum:InvId:Password2:Shp_params...
-                # ✅ ПРАВИЛЬНО: Параметры в алфавитном порядке (Shp_bot_id перед Shp_user_id)
-                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                # ✅ ИСПОЛЬЗУЕМ НОРМАЛИЗОВАННУЮ СУММУ!
+                signature_string = f"{out_sum_normalized}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
-                logger.info("🔍 Bot-specific signature verification (FINAL FIX)", 
+                logger.info("🔍 Bot-specific signature verification (WITH NORMALIZATION)", 
                            bot_id=bot_id,
                            signature_string=signature_string,
                            received_signature=signature_value,
                            expected_signature=expected_signature,
                            match=signature_value == expected_signature,
-                           out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
-                           merchant_login=bot_settings.robokassa_merchant_login,
-                           password2_length=len(bot_settings.robokassa_password2))
+                           out_sum_raw=out_sum_raw,
+                           out_sum_normalized=out_sum_normalized,
+                           normalization_changed=out_sum_raw != out_sum_normalized)
                 
                 if signature_value != expected_signature:
-                    logger.error("❌ Invalid bot-specific signature (FINAL CHECK)", 
+                    logger.error("❌ Invalid bot-specific signature (AFTER NORMALIZATION)", 
                                bot_id=bot_id,
                                received=signature_value,
                                expected=expected_signature,
-                               out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
-                               inv_id=inv_id,
-                               shp_bot_id=shp_bot_id,
-                               shp_user_id=shp_user_id,
-                               merchant_login=bot_settings.robokassa_merchant_login,
-                               password2_used=bot_settings.robokassa_password2[:5] + "***",
+                               out_sum_raw=out_sum_raw,
+                               out_sum_normalized=out_sum_normalized,
                                signature_string=signature_string)
                     return web.Response(text="ERROR: Invalid signature", status=400)
                 
-                logger.info("✅ Bot-specific signature verified successfully", 
+                logger.info("✅ Bot-specific signature verified successfully (WITH NORMALIZATION)", 
                            bot_id=bot_id,
-                           out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
-                           inv_id=inv_id)
+                           out_sum_normalized=out_sum_normalized)
                 
             except Exception as sig_error:
                 logger.error("💥 Signature verification failed", 
@@ -673,33 +675,32 @@ class BotFactory:
             subscription_start = datetime.now()
             subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
             
-            # ✅ ИСПРАВЛЕНО: Используем out_sum_raw для amount (как пришел от Robokassa)
-            payment_amount = float(out_sum_raw)
+            # ✅ ИСПОЛЬЗУЕМ НОРМАЛИЗОВАННУЮ СУММУ для сохранения
+            payment_amount = float(out_sum_normalized)
             
             # Сохраняем подписчика в БД
             try:
                 await self._save_paid_subscriber(
                     bot_id=bot_id,
                     user_id=user_id,
-                    payment_amount=payment_amount,  # ✅ Используем RAW значение
+                    payment_amount=payment_amount,
                     invoice_id=inv_id,
                     subscription_start=subscription_start,
                     subscription_end=subscription_end,
                     channel_id=bot_settings.target_channel_id
                 )
                 
-                logger.info("✅ Paid subscriber saved", 
+                logger.info("✅ Paid subscriber saved (WITH NORMALIZATION)", 
                            bot_id=bot_id,
                            user_id=user_id,
-                           amount=payment_amount,  # ✅ Логируем RAW значение
+                           amount=payment_amount,
                            subscription_end=subscription_end)
                 
             except Exception as save_error:
                 logger.error("💥 Failed to save paid subscriber", 
                            bot_id=bot_id,
                            user_id=user_id,
-                           error=str(save_error),
-                           exc_info=True)
+                           error=str(save_error))
                 return web.Response(text="ERROR: Failed to save subscription", status=500)
             
             # Добавляем пользователя в платный канал
@@ -716,26 +717,19 @@ class BotFactory:
                                bot_id=bot_id,
                                user_id=user_id,
                                channel_id=bot_settings.target_channel_id)
-                else:
-                    logger.warning("⚠️ Failed to add user to paid channel", 
-                                 bot_id=bot_id,
-                                 user_id=user_id,
-                                 channel_id=bot_settings.target_channel_id)
                 
             except Exception as channel_error:
                 logger.error("💥 Error adding user to channel", 
                            bot_id=bot_id,
                            user_id=user_id,
                            error=str(channel_error))
-                # Не прерываем процесс - подписка уже сохранена
             
             return web.Response(text=f"OK{inv_id}")
             
         except Exception as e:
             logger.error("💥 Failed to handle bot specific payment", 
                        bot_id=bot_id,
-                       error=str(e), 
-                       exc_info=True)
+                       error=str(e))
             return web.Response(text="ERROR", status=500)
 
     async def _save_paid_subscriber(self, bot_id: str, user_id: int, payment_amount: float, 
