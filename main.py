@@ -564,7 +564,7 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """✅ ИСПРАВЛЕНО: Обработка платежа с нормализацией суммы"""
+        """✅ ФИНАЛЬНО ИСПРАВЛЕНО: Обработка платежа с ПРАВИЛЬНЫМИ форматами Robokassa"""
         try:
             from datetime import datetime, timedelta
             from sqlalchemy import text
@@ -576,24 +576,6 @@ class BotFactory:
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
             
-            # ✅ КЛЮЧЕВОЕ ДОБАВЛЕНИЕ: Нормализация суммы
-            def normalize_sum(sum_str: str) -> str:
-                """Нормализует сумму к единому формату"""
-                try:
-                    # Убираем лишние нули: "5.000000" -> "5.0" -> "5"
-                    normalized = str(float(sum_str))
-                    return normalized
-                except ValueError:
-                    return sum_str
-            
-            out_sum_normalized = normalize_sum(out_sum_raw)
-            
-            logger.info("💰 Sum normalization for bot payment", 
-                       bot_id=bot_id,
-                       out_sum_raw=out_sum_raw,
-                       out_sum_normalized=out_sum_normalized,
-                       normalization_applied=out_sum_raw != out_sum_normalized)
-            
             # Проверяем обязательные параметры
             if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
                 logger.error("❌ Missing required parameters for bot payment", 
@@ -604,7 +586,7 @@ class BotFactory:
                            shp_bot_id=bool(shp_bot_id))
                 return web.Response(text="ERROR: Missing required parameters", status=400)
             
-            # Получаем настройки бота из БД
+            # ✅ Получаем настройки бота из БД
             try:
                 from database.connection import get_db_session
                 
@@ -626,37 +608,44 @@ class BotFactory:
                            error=str(db_error))
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ ИСПРАВЛЕНО: Проверяем подпись с НОРМАЛИЗОВАННОЙ суммой
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Правильный формат webhook подписи
             try:
                 import hashlib
                 
-                # ✅ ИСПОЛЬЗУЕМ НОРМАЛИЗОВАННУЮ СУММУ!
-                signature_string = f"{out_sum_normalized}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                # ✅ ROBOKASSA WEBHOOK (Result URL) FORMAT:
+                # OutSum:InvId:Password#2[:Shp_item1=value1:Shp_item2=value2:...]
+                # ✅ Shp параметры в АЛФАВИТНОМ порядке: bot_id перед user_id
+                
+                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
-                logger.info("🔍 Bot-specific signature verification (WITH NORMALIZATION)", 
+                logger.info("🔍 Bot-specific signature verification (CORRECT WEBHOOK FORMAT)", 
                            bot_id=bot_id,
                            signature_string=signature_string,
                            received_signature=signature_value,
                            expected_signature=expected_signature,
                            match=signature_value == expected_signature,
                            out_sum_raw=out_sum_raw,
-                           out_sum_normalized=out_sum_normalized,
-                           normalization_changed=out_sum_raw != out_sum_normalized)
+                           webhook_format_used=True,
+                           password2_length=len(bot_settings.robokassa_password2))
                 
                 if signature_value != expected_signature:
-                    logger.error("❌ Invalid bot-specific signature (AFTER NORMALIZATION)", 
+                    logger.error("❌ Invalid bot-specific signature (WEBHOOK FORMAT)", 
                                bot_id=bot_id,
                                received=signature_value,
                                expected=expected_signature,
                                out_sum_raw=out_sum_raw,
-                               out_sum_normalized=out_sum_normalized,
-                               signature_string=signature_string)
+                               inv_id=inv_id,
+                               shp_bot_id=shp_bot_id,
+                               shp_user_id=shp_user_id,
+                               signature_string=signature_string,
+                               format_used="webhook_result_url",
+                               password_used="password2")
                     return web.Response(text="ERROR: Invalid signature", status=400)
                 
-                logger.info("✅ Bot-specific signature verified successfully (WITH NORMALIZATION)", 
+                logger.info("✅ Bot-specific signature verified successfully (WEBHOOK FORMAT)", 
                            bot_id=bot_id,
-                           out_sum_normalized=out_sum_normalized)
+                           out_sum_raw=out_sum_raw)
                 
             except Exception as sig_error:
                 logger.error("💥 Signature verification failed", 
@@ -675,8 +664,8 @@ class BotFactory:
             subscription_start = datetime.now()
             subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
             
-            # ✅ ИСПОЛЬЗУЕМ НОРМАЛИЗОВАННУЮ СУММУ для сохранения
-            payment_amount = float(out_sum_normalized)
+            # ✅ Используем RAW сумму для сохранения
+            payment_amount = float(out_sum_raw)
             
             # Сохраняем подписчика в БД
             try:
@@ -690,7 +679,7 @@ class BotFactory:
                     channel_id=bot_settings.target_channel_id
                 )
                 
-                logger.info("✅ Paid subscriber saved (WITH NORMALIZATION)", 
+                logger.info("✅ Paid subscriber saved (WEBHOOK FORMAT)", 
                            bot_id=bot_id,
                            user_id=user_id,
                            amount=payment_amount,
