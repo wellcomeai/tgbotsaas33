@@ -564,8 +564,9 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """✅ ФИНАЛЬНО ИСПРАВЛЕНО: Обработка платежа с ПРАВИЛЬНЫМИ форматами Robokassa"""
+        """🔍 ДИАГНОСТИЧЕСКАЯ версия - найти правильный формат подписи"""
         try:
+            import hashlib
             from datetime import datetime, timedelta
             from sqlalchemy import text
             
@@ -576,17 +577,7 @@ class BotFactory:
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
             
-            # Проверяем обязательные параметры
-            if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
-                logger.error("❌ Missing required parameters for bot payment", 
-                           signature_value=bool(signature_value),
-                           out_sum=bool(out_sum_raw),
-                           inv_id=bool(inv_id),
-                           shp_user_id=bool(shp_user_id),
-                           shp_bot_id=bool(shp_bot_id))
-                return web.Response(text="ERROR: Missing required parameters", status=400)
-            
-            # ✅ Получаем настройки бота из БД
+            # Получаем настройки бота
             try:
                 from database.connection import get_db_session
                 
@@ -599,121 +590,124 @@ class BotFactory:
                     bot_settings = result.fetchone()
                     
                     if not bot_settings:
-                        logger.error("❌ Bot payment settings not found", bot_id=bot_id)
                         return web.Response(text="ERROR: Bot settings not found", status=400)
                     
             except Exception as db_error:
-                logger.error("💥 Database error getting bot settings", 
-                           bot_id=bot_id,
-                           error=str(db_error))
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Правильный формат webhook подписи
-            try:
-                import hashlib
-                
-                # ✅ ROBOKASSA WEBHOOK (Result URL) FORMAT:
-                # OutSum:InvId:Password#2[:Shp_item1=value1:Shp_item2=value2:...]
-                # ✅ Shp параметры в АЛФАВИТНОМ порядке: bot_id перед user_id
-                
-                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
-                expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
-                
-                logger.info("🔍 Bot-specific signature verification (CORRECT WEBHOOK FORMAT)", 
-                           bot_id=bot_id,
-                           signature_string=signature_string,
-                           received_signature=signature_value,
-                           expected_signature=expected_signature,
-                           match=signature_value == expected_signature,
-                           out_sum_raw=out_sum_raw,
-                           webhook_format_used=True,
-                           password2_length=len(bot_settings.robokassa_password2))
-                
-                if signature_value != expected_signature:
-                    logger.error("❌ Invalid bot-specific signature (WEBHOOK FORMAT)", 
-                               bot_id=bot_id,
-                               received=signature_value,
-                               expected=expected_signature,
-                               out_sum_raw=out_sum_raw,
-                               inv_id=inv_id,
-                               shp_bot_id=shp_bot_id,
-                               shp_user_id=shp_user_id,
-                               signature_string=signature_string,
-                               format_used="webhook_result_url",
-                               password_used="password2")
-                    return web.Response(text="ERROR: Invalid signature", status=400)
-                
-                logger.info("✅ Bot-specific signature verified successfully (WEBHOOK FORMAT)", 
-                           bot_id=bot_id,
-                           out_sum_raw=out_sum_raw)
-                
-            except Exception as sig_error:
-                logger.error("💥 Signature verification failed", 
-                           bot_id=bot_id,
-                           error=str(sig_error))
-                return web.Response(text="ERROR: Signature verification failed", status=500)
+            # 🔍 ДИАГНОСТИКА: Тестируем ВСЕ возможные варианты подписи
+            password2 = bot_settings.robokassa_password2
             
-            # Получаем user_id
-            try:
-                user_id = int(shp_user_id)
-            except ValueError:
-                logger.error("❌ Invalid user_id format", shp_user_id=shp_user_id)
-                return web.Response(text="ERROR: Invalid user_id format", status=400)
-            
-            # Рассчитываем дату окончания подписки
-            subscription_start = datetime.now()
-            subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
-            
-            # ✅ Используем RAW сумму для сохранения
-            payment_amount = float(out_sum_raw)
-            
-            # Сохраняем подписчика в БД
-            try:
-                await self._save_paid_subscriber(
-                    bot_id=bot_id,
-                    user_id=user_id,
-                    payment_amount=payment_amount,
-                    invoice_id=inv_id,
-                    subscription_start=subscription_start,
-                    subscription_end=subscription_end,
-                    channel_id=bot_settings.target_channel_id
-                )
+            test_variants = [
+                # Вариант 1: Наш текущий формат
+                f"{out_sum_raw}:{inv_id}:{password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}",
                 
-                logger.info("✅ Paid subscriber saved (WEBHOOK FORMAT)", 
-                           bot_id=bot_id,
-                           user_id=user_id,
-                           amount=payment_amount,
-                           subscription_end=subscription_end)
+                # Вариант 2: Обратный порядок Shp
+                f"{out_sum_raw}:{inv_id}:{password2}:Shp_user_id={shp_user_id}:Shp_bot_id={shp_bot_id}",
                 
-            except Exception as save_error:
-                logger.error("💥 Failed to save paid subscriber", 
-                           bot_id=bot_id,
-                           user_id=user_id,
-                           error=str(save_error))
-                return web.Response(text="ERROR: Failed to save subscription", status=500)
+                # Вариант 3: Без Shp параметров
+                f"{out_sum_raw}:{inv_id}:{password2}",
+                
+                # Вариант 4: Shp без знака =
+                f"{out_sum_raw}:{inv_id}:{password2}:Shp_bot_id:{shp_bot_id}:Shp_user_id:{shp_user_id}",
+                
+                # Вариант 5: Маленькими буквами shp
+                f"{out_sum_raw}:{inv_id}:{password2}:shp_bot_id={shp_bot_id}:shp_user_id={shp_user_id}",
+                
+                # Вариант 6: Нормализованная сумма
+                f"{str(float(out_sum_raw))}:{inv_id}:{password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}",
+                
+                # Вариант 7: С merchant login (как в исходящих)
+                f"{bot_settings.robokassa_merchant_login}:{out_sum_raw}:{inv_id}:{password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}",
+                
+                # Вариант 8: Password1 вместо Password2
+                f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password1}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}",
+            ]
             
-            # Добавляем пользователя в платный канал
-            try:
-                success = await self._add_user_to_paid_channel(
-                    bot_id=bot_id,
-                    user_id=user_id,
-                    channel_id=bot_settings.target_channel_id,
-                    subscription_end=subscription_end
-                )
+            logger.info("🔍 ДИАГНОСТИКА: Тестируем все варианты подписи", 
+                       bot_id=bot_id,
+                       received_signature=signature_value,
+                       total_variants=len(test_variants))
+            
+            working_variant = None
+            
+            for i, variant_string in enumerate(test_variants, 1):
+                expected_signature = hashlib.md5(variant_string.encode('utf-8')).hexdigest().upper()
+                is_match = signature_value == expected_signature
                 
-                if success:
-                    logger.info("✅ User added to paid channel", 
+                logger.info(f"🧪 ТЕСТ {i}/8: {'✅ СОВПАДЕНИЕ!' if is_match else '❌ Не совпадает'}", 
+                           variant_number=i,
+                           signature_string=variant_string,
+                           expected_hash=expected_signature,
+                           received_hash=signature_value,
+                           match=is_match)
+                
+                if is_match:
+                    working_variant = i
+                    logger.info(f"🎉 НАЙДЕН ПРАВИЛЬНЫЙ ФОРМАТ! Вариант {i}", 
+                               working_format=variant_string,
+                               signature_match=True)
+                    break
+            
+            if working_variant:
+                # ✅ Найден правильный формат - продолжаем обработку
+                logger.info("✅ Подпись верифицирована, обрабатываем платеж", 
+                           working_variant=working_variant)
+                
+                # Получаем user_id
+                try:
+                    user_id = int(shp_user_id)
+                except ValueError:
+                    return web.Response(text="ERROR: Invalid user_id format", status=400)
+                
+                # Рассчитываем дату окончания подписки
+                subscription_start = datetime.now()
+                subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
+                payment_amount = float(out_sum_raw)
+                
+                # Сохраняем подписчика в БД
+                try:
+                    await self._save_paid_subscriber(
+                        bot_id=bot_id,
+                        user_id=user_id,
+                        payment_amount=payment_amount,
+                        invoice_id=inv_id,
+                        subscription_start=subscription_start,
+                        subscription_end=subscription_end,
+                        channel_id=bot_settings.target_channel_id
+                    )
+                    
+                    logger.info("✅ Paid subscriber saved with correct signature format", 
                                bot_id=bot_id,
                                user_id=user_id,
-                               channel_id=bot_settings.target_channel_id)
+                               working_variant=working_variant)
+                    
+                except Exception as save_error:
+                    logger.error("💥 Failed to save paid subscriber", error=str(save_error))
+                    return web.Response(text="ERROR: Failed to save subscription", status=500)
                 
-            except Exception as channel_error:
-                logger.error("💥 Error adding user to channel", 
-                           bot_id=bot_id,
-                           user_id=user_id,
-                           error=str(channel_error))
+                # Добавляем пользователя в платный канал
+                try:
+                    await self._add_user_to_paid_channel(
+                        bot_id=bot_id,
+                        user_id=user_id,
+                        channel_id=bot_settings.target_channel_id,
+                        subscription_end=subscription_end
+                    )
+                except Exception as channel_error:
+                    logger.error("💥 Error adding user to channel", error=str(channel_error))
+                
+                return web.Response(text=f"OK{inv_id}")
             
-            return web.Response(text=f"OK{inv_id}")
+            else:
+                # ❌ Ни один вариант не совпал
+                logger.error("❌ НИ ОДИН ВАРИАНТ ПОДПИСИ НЕ СОВПАЛ!", 
+                           bot_id=bot_id,
+                           received_signature=signature_value,
+                           total_tested=len(test_variants),
+                           suggestion="Проверьте пароли в настройках Robokassa")
+                
+                return web.Response(text="ERROR: Invalid signature - all variants failed", status=400)
             
         except Exception as e:
             logger.error("💥 Failed to handle bot specific payment", 
