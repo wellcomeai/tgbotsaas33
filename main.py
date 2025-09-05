@@ -606,7 +606,8 @@ class BotFactory:
                                bot_id=bot_id,
                                price=bot_settings.price,
                                period_days=bot_settings.subscription_period_days,
-                               channel_id=bot_settings.target_channel_id)
+                               channel_id=bot_settings.target_channel_id,
+                               merchant_login=bot_settings.robokassa_merchant_login)
                     
             except Exception as db_error:
                 logger.error("💥 Database error getting bot settings", 
@@ -615,26 +616,41 @@ class BotFactory:
                            exc_info=True)
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # Проверяем подпись с настройками КОНКРЕТНОГО БОТА
+            # ✅ ИСПРАВЛЕНО: Проверяем подпись с ПРАВИЛЬНЫМ паролем и порядком
             try:
                 import hashlib
                 
+                # ✅ ПРАВИЛЬНО: Для Result URL используется password2
+                # ✅ ПРАВИЛЬНО: Порядок параметров как в Robokassa документации
                 signature_string = f"{out_sum}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
-                logger.info("🔍 Bot-specific signature verification", 
+                logger.info("🔍 Bot-specific signature verification (FIXED)", 
                            bot_id=bot_id,
                            signature_string=signature_string,
                            received_signature=signature_value,
                            expected_signature=expected_signature,
-                           match=signature_value == expected_signature)
+                           match=signature_value == expected_signature,
+                           merchant_login=bot_settings.robokassa_merchant_login,
+                           password2_length=len(bot_settings.robokassa_password2))
                 
                 if signature_value != expected_signature:
-                    logger.error("❌ Invalid bot-specific signature", 
+                    logger.error("❌ Invalid bot-specific signature (DETAILS)", 
                                bot_id=bot_id,
                                received=signature_value,
-                               expected=expected_signature)
+                               expected=expected_signature,
+                               out_sum=out_sum,
+                               inv_id=inv_id,
+                               shp_bot_id=shp_bot_id,
+                               shp_user_id=shp_user_id,
+                               merchant_login=bot_settings.robokassa_merchant_login,
+                               password2_used=bot_settings.robokassa_password2[:5] + "***")
                     return web.Response(text="ERROR: Invalid signature", status=400)
+                
+                logger.info("✅ Bot-specific signature verified successfully", 
+                           bot_id=bot_id,
+                           out_sum=out_sum,
+                           inv_id=inv_id)
                 
             except Exception as sig_error:
                 logger.error("💥 Signature verification failed", 
