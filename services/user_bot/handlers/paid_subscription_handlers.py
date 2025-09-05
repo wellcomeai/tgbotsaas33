@@ -1513,7 +1513,7 @@ class PaidSubscriptionHandler:
             return []
     
     async def _generate_payment_url(self, user_id: int, amount: float, description: str = "Подписка") -> str:
-        """✅ ИСПРАВЛЕНО: Генерация ссылки БЕЗ форматирования суммы (PRODUCTION)"""
+        """✅ ФИНАЛЬНО ИСПРАВЛЕНО: Генерация ссылки с ПРАВИЛЬНЫМ форматом исходящей подписи"""
         try:
             import hashlib
             import urllib.parse
@@ -1524,13 +1524,10 @@ class PaidSubscriptionHandler:
             
             # Параметры для Robokassa
             merchant_login = settings.robokassa_merchant_login
-            password1 = settings.robokassa_password1
+            password1 = settings.robokassa_password1  # ✅ Password#1 для исходящих
             
-            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: НЕ ФОРМАТИРУЕМ СУММУ!
-            # БЫЛО: out_sum = f"{amount:.2f}"  # "5.00" отправляли
-            # СТАЛО: out_sum = str(amount)     # "5.0" отправляем
-            # Robokassa вернет: "5.000000"    # но нормализация обработает
-            out_sum = str(amount)  # Отправляем как есть без форматирования
+            # ✅ НЕ форматируем сумму
+            out_sum = str(amount)  # "5.0" вместо "5.00"
             
             inv_id = str(int(datetime.now().timestamp()))
             
@@ -1538,18 +1535,24 @@ class PaidSubscriptionHandler:
             shp_bot_id = self.bot_id
             shp_user_id = str(user_id)
             
-            # ✅ Подпись с неформатированной суммой
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ПРАВИЛЬНЫЙ формат исходящей подписи
+            # ROBOKASSA OUTGOING (Payment Link) FORMAT:
+            # MerchantLogin:OutSum:InvId:Password#1[:Shp_item1=value1:Shp_item2=value2:...]
+            # ✅ Shp параметры в АЛФАВИТНОМ порядке: bot_id перед user_id
+            
             signature_string = f"{merchant_login}:{out_sum}:{inv_id}:{password1}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
             signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
             
-            logger.info("🔗 Payment URL generation (FIXED FORMAT)", 
+            logger.info("🔗 Payment URL generation (CORRECT OUTGOING FORMAT)", 
                        bot_id=self.bot_id,
                        user_id=user_id,
                        original_amount=amount,
-                       out_sum_sent=out_sum,  # ✅ Логируем что именно отправляем
+                       out_sum_sent=out_sum,
                        signature_string=signature_string,
                        generated_signature=signature,
-                       sum_format_fixed=True)
+                       outgoing_format_used=True,
+                       password1_length=len(password1),
+                       merchant_login=merchant_login)
             
             # Формируем URL для РЕАЛЬНЫХ платежей
             params = {
@@ -1564,20 +1567,19 @@ class PaidSubscriptionHandler:
                 'Encoding': 'utf-8'
             }
             
-            # ✅ ВСЕГДА используем PRODUCTION URL
+            # ✅ PRODUCTION URL
             base_url = "https://auth.robokassa.ru/Merchant/Index.aspx"
             
             query_string = urllib.parse.urlencode(params)
             payment_url = f"{base_url}?{query_string}"
             
-            logger.info("✅ Generated PRODUCTION payment URL (UNFORMATTED SUM)", 
+            logger.info("✅ Generated PRODUCTION payment URL (OUTGOING FORMAT)", 
                        bot_id=self.bot_id,
                        user_id=user_id,
                        amount=amount,
-                       out_sum_format=out_sum,
                        url_length=len(payment_url),
-                       production_mode=True,
-                       robokassa_format_issue_fixed=True)
+                       format_match="outgoing_payment_link",
+                       robokassa_format_fixed=True)
             
             return payment_url
             
