@@ -649,7 +649,7 @@ class BotFactory:
                 
                 logger.info("✅ Bot-specific signature verified successfully", 
                            bot_id=bot_id,
-                           out_sum=out_sum,
+                           formatted_sum=formatted_sum,
                            inv_id=inv_id)
                 
             except Exception as sig_error:
