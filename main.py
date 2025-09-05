@@ -564,24 +564,17 @@ class BotFactory:
             return web.Response(text="ERROR", status=500)
 
     async def _handle_bot_specific_payment(self, data: dict, bot_id: str):
-        """✅ ИСПРАВЛЕНО: Обработка платежа конкретного бота"""
+        """✅ ИСПРАВЛЕНО: Обработка платежа конкретного бота - ФИКС ПОДПИСИ"""
         try:
             from datetime import datetime, timedelta
             from sqlalchemy import text
             
             # Извлекаем параметры
             signature_value = data.get('SignatureValue', '').upper()
-            out_sum_raw = data.get('OutSum', '')
+            out_sum_raw = data.get('OutSum', '')  # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: НЕ форматируем!
             inv_id = data.get('InvId', '')
             shp_user_id = data.get('Shp_user_id', '')
             shp_bot_id = data.get('Shp_bot_id', '')
-            
-            # ✅ ИСПРАВЛЕНО: Форматируем сумму правильно (2 знака после запятой)
-            try:
-                formatted_sum = f"{float(out_sum_raw):.2f}"
-            except (ValueError, TypeError):
-                logger.error("❌ Invalid OutSum format", out_sum=out_sum_raw)
-                return web.Response(text="ERROR: Invalid OutSum format", status=400)
             
             # Проверяем обязательные параметры
             if not all([signature_value, out_sum_raw, inv_id, shp_user_id, shp_bot_id]):
@@ -623,14 +616,15 @@ class BotFactory:
                            exc_info=True)
                 return web.Response(text="ERROR: Database error", status=500)
             
-            # ✅ ИСПРАВЛЕНО: Проверяем подпись с правильными параметрами
+            # ✅ ФУНДАМЕНТАЛЬНОЕ ИСПРАВЛЕНИЕ: Проверяем подпись БЕЗ форматирования суммы
             try:
                 import hashlib
                 
+                # ✅ ПРАВИЛЬНО: Используем out_sum_raw как пришел от Robokassa (без форматирования!)
                 # ✅ ПРАВИЛЬНО: Для Result URL используется password2
                 # ✅ ПРАВИЛЬНО: Формат для проверки уведомления: OutSum:InvId:Password2:Shp_params...
                 # ✅ ПРАВИЛЬНО: Параметры в алфавитном порядке (Shp_bot_id перед Shp_user_id)
-                signature_string = f"{formatted_sum}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
+                signature_string = f"{out_sum_raw}:{inv_id}:{bot_settings.robokassa_password2}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
                 expected_signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
                 
                 logger.info("🔍 Bot-specific signature verification (FINAL FIX)", 
@@ -639,8 +633,7 @@ class BotFactory:
                            received_signature=signature_value,
                            expected_signature=expected_signature,
                            match=signature_value == expected_signature,
-                           formatted_sum=formatted_sum,
-                           raw_sum=out_sum_raw,
+                           out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
                            merchant_login=bot_settings.robokassa_merchant_login,
                            password2_length=len(bot_settings.robokassa_password2))
                 
@@ -649,8 +642,7 @@ class BotFactory:
                                bot_id=bot_id,
                                received=signature_value,
                                expected=expected_signature,
-                               formatted_sum=formatted_sum,
-                               raw_sum=out_sum_raw,
+                               out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
                                inv_id=inv_id,
                                shp_bot_id=shp_bot_id,
                                shp_user_id=shp_user_id,
@@ -661,7 +653,7 @@ class BotFactory:
                 
                 logger.info("✅ Bot-specific signature verified successfully", 
                            bot_id=bot_id,
-                           formatted_sum=formatted_sum,
+                           out_sum_raw=out_sum_raw,  # ✅ Логируем RAW значение
                            inv_id=inv_id)
                 
             except Exception as sig_error:
@@ -681,12 +673,15 @@ class BotFactory:
             subscription_start = datetime.now()
             subscription_end = subscription_start + timedelta(days=bot_settings.subscription_period_days)
             
+            # ✅ ИСПРАВЛЕНО: Используем out_sum_raw для amount (как пришел от Robokassa)
+            payment_amount = float(out_sum_raw)
+            
             # Сохраняем подписчика в БД
             try:
                 await self._save_paid_subscriber(
                     bot_id=bot_id,
                     user_id=user_id,
-                    payment_amount=float(formatted_sum),
+                    payment_amount=payment_amount,  # ✅ Используем RAW значение
                     invoice_id=inv_id,
                     subscription_start=subscription_start,
                     subscription_end=subscription_end,
@@ -696,7 +691,7 @@ class BotFactory:
                 logger.info("✅ Paid subscriber saved", 
                            bot_id=bot_id,
                            user_id=user_id,
-                           amount=formatted_sum,
+                           amount=payment_amount,  # ✅ Логируем RAW значение
                            subscription_end=subscription_end)
                 
             except Exception as save_error:
@@ -912,7 +907,17 @@ class BotFactory:
             logger.info("🚀 Starting Bot Factory", 
                        version=settings.app_version,
                        auto_migrations=True,
-                       bot_specific_payments=True)
+                       unified_payment_webhooks=True,
+                       master_bot_payments=["tokens", "subscriptions", "referrals"],
+                       bot_specific_payments=["paid_channels"],
+                       schedulers_enabled=["message_limits", "mass_broadcasts", "paid_subscriptions"],
+                       robokassa_production=not settings.robokassa_is_test,
+                       robokassa_configured=bool(settings.robokassa_merchant_login and settings.robokassa_password2),
+                       master_payment_amount=f"{settings.robokassa_payment_amount}₽",
+                       subscription_days=settings.subscription_days_per_payment,
+                       tokens_per_purchase=getattr(settings, 'tokens_per_purchase', 'Not configured'),
+                       python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                       platform=sys.platform)
             
             # ✅ ВСЕГДА запускаем миграции перед инициализацией БД
             logger.info("🔄 Running automatic database migrations...")
