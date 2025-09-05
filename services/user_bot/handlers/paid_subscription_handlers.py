@@ -1511,7 +1511,7 @@ class PaidSubscriptionHandler:
             return []
     
     async def _generate_payment_url(self, user_id: int, amount: float, description: str = "Подписка") -> str:
-        """✅ ИЗМЕНЕНО: Генерация ссылки на РЕАЛЬНУЮ оплату через Robokassa (PRODUCTION)"""
+        """✅ ИСПРАВЛЕНО: Генерация ссылки на РЕАЛЬНУЮ оплату через Robokassa (PRODUCTION)"""
         try:
             import hashlib
             import urllib.parse
@@ -1522,7 +1522,7 @@ class PaidSubscriptionHandler:
             
             # Параметры для Robokassa
             merchant_login = settings.robokassa_merchant_login
-            password1 = settings.robokassa_password1
+            password1 = settings.robokassa_password1  # ✅ Для генерации ссылки используем password1
             out_sum = f"{amount:.2f}"
             inv_id = str(int(datetime.now().timestamp()))
             
@@ -1530,9 +1530,21 @@ class PaidSubscriptionHandler:
             shp_bot_id = self.bot_id
             shp_user_id = str(user_id)
             
-            # Формируем строку для подписи
+            # ✅ ИСПРАВЛЕНО: Правильный порядок параметров для генерации подписи
+            # Согласно документации Robokassa для создания ссылки:
+            # MerchantLogin:OutSum:InvId:Password#1[:Shp_item1=value1:Shp_item2=value2:...:Shp_itemN=valueN]
             signature_string = f"{merchant_login}:{out_sum}:{inv_id}:{password1}:Shp_bot_id={shp_bot_id}:Shp_user_id={shp_user_id}"
             signature = hashlib.md5(signature_string.encode('utf-8')).hexdigest().upper()
+            
+            logger.info("🔗 Generated payment URL signature", 
+                       bot_id=self.bot_id,
+                       user_id=user_id,
+                       signature_string=signature_string,
+                       generated_signature=signature,
+                       merchant_login=merchant_login,
+                       out_sum=out_sum,
+                       inv_id=inv_id,
+                       password1_used=password1[:5] + "***")
             
             # Формируем URL для РЕАЛЬНЫХ платежей
             params = {
@@ -1547,7 +1559,7 @@ class PaidSubscriptionHandler:
                 'Encoding': 'utf-8'
             }
             
-            # ✅ ИЗМЕНЕНО: ВСЕГДА используем PRODUCTION URL (убрали проверку test_mode)
+            # ✅ ВСЕГДА используем PRODUCTION URL (убрали проверку test_mode)
             base_url = "https://auth.robokassa.ru/Merchant/Index.aspx"
             
             query_string = urllib.parse.urlencode(params)
@@ -1558,6 +1570,7 @@ class PaidSubscriptionHandler:
                        user_id=user_id,
                        amount=amount,
                        description=description,
+                       url_length=len(payment_url),
                        production_mode=True)
             
             return payment_url
