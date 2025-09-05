@@ -686,7 +686,7 @@ class BotFactory:
                     channel_id=bot_settings.target_channel_id
                 )
                 
-                logger.info("✅ Paid subscriber saved (WEBHOOK FORMAT)", 
+                logger.info("✅ Paid subscriber saved (WEBHOOK FORMAT with BOTH Shp params)", 
                            bot_id=bot_id,
                            user_id=user_id,
                            amount=payment_amount,
