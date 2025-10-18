@@ -7,6 +7,7 @@
 🔗 ССЫЛКИ: Извлечение и форматирование ссылок для AI агента
 📺 КАНАЛЫ: Управление каналами и сохранение результатов рерайта
 ✅ ИСПРАВЛЕНО: Гарантированные медиа ключи в get_last_rewrite и save_rewrite_result
+🗑️ ОБНОВЛЕНО: По умолчанию HARD DELETE агентов (полное удаление из БД)
 
 ОСНОВНЫЕ ИСПРАВЛЕНИЯ:
 1. Унифицирована структура возврата result['content']['rewritten_text']
@@ -20,6 +21,7 @@
 9. ✨ НОВОЕ: Поддержка извлечения и форматирования ссылок для AI агента
 10. 📺 НОВОЕ: Методы для работы с каналами и сохранения результатов рерайта
 11. ✅ ИСПРАВЛЕНО: Гарантированные медиа ключи - дублирование media/media_info в обоих методах
+12. 🗑️ ОБНОВЛЕНО: Hard delete по умолчанию - агенты полностью удаляются из БД
 """
 
 import time
@@ -35,12 +37,12 @@ logger = structlog.get_logger()
 
 
 class ContentManager:
-    """✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ менеджер контент-агентов с поддержкой медиагрупп, TokenManager, ссылок и каналов"""
+    """✅ ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ менеджер контент-агентов с поддержкой медиагрупп, TokenManager, ссылок, каналов и hard delete"""
     
     def __init__(self):
         # ✅ Используем существующий OpenAI клиент
         self.openai_client = self._get_openai_client()
-        logger.info("🎨 ContentManager initialized with media group support, TokenManager integration, links and channels support", 
+        logger.info("🎨 ContentManager initialized with media group support, TokenManager integration, links, channels and hard delete", 
                    has_client=bool(self.openai_client))
     
     def _get_openai_client(self):
@@ -748,29 +750,42 @@ class ContentManager:
             logger.error("💥 Error updating content agent", bot_id=bot_id, error=str(e))
             return False
     
-    async def delete_content_agent(self, bot_id: str, soft_delete: bool = True) -> bool:
-        """Удаление контент-агента"""
+    async def delete_content_agent(self, bot_id: str, soft_delete: bool = False) -> bool:
+        """🗑️ ОБНОВЛЕНО: Удаление контент-агента с hard delete по умолчанию"""
         try:
             await self._ensure_tables_exist()
             
             async with get_db_session() as session:
                 if soft_delete:
+                    # Опциональный soft delete (для совместимости)
                     query = text("""
                     UPDATE content_agents 
                     SET is_active = false, updated_at = NOW()
                     WHERE bot_id = :bot_id AND is_active = true
                     """)
+                    logger.info("🔄 Soft deleting content agent", bot_id=bot_id)
                 else:
+                    # ✅ ПО УМОЛЧАНИЮ: Полное удаление из БД
                     query = text("DELETE FROM content_agents WHERE bot_id = :bot_id")
+                    logger.info("🗑️ Hard deleting content agent from database", bot_id=bot_id)
                 
                 result = await session.execute(query, {'bot_id': bot_id})
                 await session.commit()
                 
                 rows_affected = result.rowcount
+                
+                logger.info("✅ Content agent deleted successfully", 
+                           bot_id=bot_id,
+                           soft_delete=soft_delete,
+                           rows_affected=rows_affected)
+                
                 return rows_affected > 0
                     
         except Exception as e:
-            logger.error("💥 Error deleting content agent", bot_id=bot_id, error=str(e))
+            logger.error("💥 Error deleting content agent", 
+                        bot_id=bot_id,
+                        soft_delete=soft_delete,
+                        error=str(e))
             return False
     
     async def has_content_agent(self, bot_id: str) -> bool:
