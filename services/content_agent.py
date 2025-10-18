@@ -14,6 +14,7 @@
 10. Работа с настройками и лимитами
 11. ✨ НОВОЕ: Извлечение ссылок из сообщений
 12. ✅ ИСПРАВЛЕНО: Гарантированное включение media_info в ответ
+13. 🗑️ ОБНОВЛЕНО: Hard delete агентов по умолчанию
 
 🚀 НОВОЕ В ЭТОЙ ВЕРСИИ:
 - Полная интеграция с TokenManager
@@ -26,6 +27,7 @@
 - Детальная статистика и метрики
 - ✨ Извлечение и анализ ссылок из сообщений
 - ✅ Исправлено: Гарантированное сохранение media_info в ответах
+- 🗑️ Исправлено: Hard delete через параметр soft_delete
 """
 
 import structlog
@@ -650,12 +652,19 @@ class ContentAgentService:
                 }
             }
     
-    async def delete_agent(self, bot_id: str, force: bool = False) -> Dict[str, Any]:
-        """✅ Удаление агента с очисткой OpenAI и подтверждением"""
+    async def delete_agent(self, bot_id: str, soft_delete: bool = False) -> Dict[str, Any]:
+        """
+        🗑️ ИСПРАВЛЕНО: Удаление агента с очисткой OpenAI и подтверждением
+        
+        Args:
+            bot_id: ID бота
+            soft_delete: False = полное удаление (hard delete), True = is_active=false (soft delete)
+        """
         
         logger.info("🗑️ Deleting content agent", 
                    bot_id=bot_id,
-                   force=force)
+                   soft_delete=soft_delete,
+                   deletion_type='soft' if soft_delete else 'hard')
         
         try:
             # Получаем данные агента перед удалением
@@ -676,25 +685,12 @@ class ContentAgentService:
             tokens_used = stats.get('tokens_used', 0)
             total_rewrites = stats.get('total_rewrites', 0)
             
-            # Проверяем, можно ли удалять (если не force)
-            if not force and tokens_used > 0:
-                logger.info("⚠️ Agent has usage history, requiring confirmation", 
+            # Проверяем, можно ли удалять (если не soft_delete и есть история)
+            if not soft_delete and tokens_used > 0:
+                logger.info("⚠️ Agent has usage history, but proceeding with hard delete", 
                            bot_id=bot_id,
                            tokens_used=tokens_used,
                            total_rewrites=total_rewrites)
-                
-                return {
-                    'success': False,
-                    'error': 'confirmation_required',
-                    'message': f'Агент "{agent_name}" имеет историю использования. Подтвердите удаление.',
-                    'agent_data': {
-                        'name': agent_name,
-                        'tokens_used': tokens_used,
-                        'total_rewrites': total_rewrites,
-                        'created_at': agent.get('created_at')
-                    },
-                    'require_force': True
-                }
             
             # Удаляем из OpenAI
             openai_deletion_success = False
@@ -713,17 +709,14 @@ class ContentAgentService:
                                 openai_agent_id=openai_agent_id,
                                 error=str(openai_error))
                     
-                    if not force:
-                        return {
-                            'success': False,
-                            'error': 'openai_deletion_failed',
-                            'message': f'Не удалось удалить агента из OpenAI: {str(openai_error)}. Используйте force=True для принудительного удаления.'
-                        }
+                    if not soft_delete:
+                        logger.warning("⚠️ OpenAI deletion failed but continuing with DB deletion", 
+                                      bot_id=bot_id)
             
-            # Удаляем из базы данных (soft delete)
+            # Удаляем из базы данных (передаем параметр soft_delete напрямую)
             db_deletion_success = await self.content_manager.delete_content_agent(
                 bot_id, 
-                soft_delete=True
+                soft_delete=soft_delete  # ✅ ИСПРАВЛЕНО: передаем параметр напрямую
             )
             
             if not db_deletion_success:
@@ -733,13 +726,15 @@ class ContentAgentService:
                     'message': 'Не удалось удалить агента из базы данных'
                 }
             
+            deletion_type = 'soft' if soft_delete else 'hard'
+            
             logger.info("✅ Content agent deleted successfully", 
                        bot_id=bot_id,
                        agent_name=agent_name,
                        had_openai_integration=had_openai_integration,
                        openai_deletion_success=openai_deletion_success,
                        tokens_preserved=tokens_used,
-                       force_delete=force)
+                       deletion_type=deletion_type)
             
             return {
                 'success': True,
@@ -749,19 +744,20 @@ class ContentAgentService:
                     'openai_deletion_success': openai_deletion_success,
                     'tokens_used': tokens_used,
                     'total_rewrites': total_rewrites,
-                    'deletion_type': 'force' if force else 'normal'
+                    'deletion_type': deletion_type  # ✅ ИСПРАВЛЕНО
                 },
                 'preserved_data': {
                     'statistics': True,
                     'tokens_history': True,
                     'usage_logs': True
                 },
-                'message': f'Агент "{agent_name}" удален успешно. Статистика сохранена.'
+                'message': f'Агент "{agent_name}" удален успешно ({deletion_type} delete). Статистика сохранена.'
             }
             
         except Exception as e:
             logger.error("💥 Exception deleting content agent", 
                         bot_id=bot_id,
+                        soft_delete=soft_delete,
                         error=str(e),
                         exc_info=True)
             
@@ -772,7 +768,7 @@ class ContentAgentService:
                 'details': {
                     'error_type': type(e).__name__,
                     'bot_id': bot_id,
-                    'force': force
+                    'soft_delete': soft_delete  # ✅ ИСПРАВЛЕНО
                 }
             }
     
@@ -1892,7 +1888,7 @@ class ContentAgentService:
         """✅ Информация о сервисе"""
         return {
             'service_name': 'ContentAgentService',
-            'version': '2.1.1',  # ✅ Обновлена версия
+            'version': '2.2.0',  # ✅ ОБНОВЛЕНА ВЕРСИЯ (исправлен delete_agent)
             'features': [
                 'unified_token_system',
                 'media_group_support',
@@ -1901,7 +1897,8 @@ class ContentAgentService:
                 'comprehensive_statistics',
                 'openai_responses_api',
                 'links_extraction',
-                'guaranteed_media_info'  # ✅ НОВОЕ
+                'guaranteed_media_info',
+                'hard_delete_support'  # ✅ НОВОЕ
             ],
             'settings': self.default_settings,
             'status': 'active',
