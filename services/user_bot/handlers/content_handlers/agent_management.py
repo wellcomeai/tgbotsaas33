@@ -811,7 +811,7 @@ class AgentManagementMixin:
             )
             
             # Удаляем агента через сервис
-            result = await content_agent_service.delete_agent(self.bot_id, force=True)
+            result = await content_agent_service.delete_agent(self.bot_id, soft_delete=False)
             
             if result['success']:
                 deleted_agent = result.get('deleted_agent', {})
